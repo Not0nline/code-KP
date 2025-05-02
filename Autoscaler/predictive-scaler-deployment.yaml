@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: predictive-scaler
+  namespace: default # Ensure namespace matches RBAC
+spec:
+  replicas: 1 # Usually only need one predictor instance
+  selector:
+    matchLabels:
+      app: predictive-scaler
+  template:
+    metadata:
+      labels:
+        app: predictive-scaler
+    spec:
+      serviceAccountName: predictive-scaler-sa # <-- ADD THIS LINE
+      containers:
+      - name: predictive-scaler
+        # Make sure image includes the kubernetes client library!
+        image: 4dri41/predictive-scaler:latest # Use your actual image
+        ports:
+        - containerPort: 5000
+        env:
+        - name: APP_NAME
+          value: "predictive-scaler"
+        # NEW: Env vars to configure the target for metrics collection
+        - name: TARGET_NAMESPACE
+          value: "default" # Namespace of product-app-combined
+        - name: TARGET_DEPLOYMENT
+          value: "product-app-combined" # Deployment to get metrics from
+        - name: TARGET_APP_LABEL
+          value: "product-app-combined" # Label used by product-app-combined pods
+        resources: # Add appropriate resources for the scaler
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        readinessProbe: # Add probes
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5

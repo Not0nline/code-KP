@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-app-hpa
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: product-app-hpa
+  template:
+    metadata:
+      labels:
+        app: product-app-hpa
+    spec:
+      containers:
+      - name: product-app
+        image: 4drial/product-app:latest
+        env:
+        - name: APP_TYPE
+          value: "product-app-hpa"
+        ports:
+        - name: http-metrics
+          containerPort: 5000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"

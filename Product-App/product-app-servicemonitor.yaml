@@ -1,0 +1,14 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: product-app-monitor
+  labels:
+    release: prometheus-stack  # Must match your Prometheus Stack’s release name
+spec:
+  selector:
+    matchLabels:
+      app: product-app  # Matches the Service’s `app: product-app` label
+  endpoints:
+  - port: metrics       # Matches the Service’s port `name: metrics`
+    interval: 30s
+    path: /metrics

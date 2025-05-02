@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-app-combined
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: product-app-combined
+  template:
+    metadata:
+      labels:
+        app: product-app-combined
+    spec:
+      containers:
+      - name: product-app
+        image: 4drial/product-app:latest
+        ports:
+        - name: http-metrics
+          containerPort: 5000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "1"
+            memory: "512Mi"
+        env:
+        - name: APP_TYPE
+          value: "product-app-combined"

@@ -1,0 +1,19 @@
+kind: ServiceMonitor
+metadata:
+  name: product-app-combined-monitor
+  namespace: monitoring
+  labels:
+    release: prometheus
+    app.kubernetes.io/instance: prometheus
+spec:
+  namespaceSelector:
+    matchNames:
+      - default
+  selector:
+    matchLabels:
+      app: product-app-combined
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 15s
+    scrapeTimeout: 30s  # Extended timeout

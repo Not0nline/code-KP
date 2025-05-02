@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scaling-controller-hpa
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scaling-controller-hpa
+  template:
+    metadata:
+      labels:
+        app: scaling-controller-hpa
+    spec:
+      serviceAccountName: predictive-scaler
+      containers:
+      - name: controller
+        image: 4dri4l/scaling-controller:latest
+        imagePullPolicy: Always
+        env:
+        - name: PREDICTIVE_SCALER_SERVICE
+          value: "http://predictive-scaler:5000/predict"
+        - name: TARGET_DEPLOYMENT
+          value: "product-app-hpa"
+        - name: TARGET_NAMESPACE
+          value: "default"
+        - name: POLL_INTERVAL
+          value: "60"
+        - name: PROMETHEUS_SERVER
+          value: "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"

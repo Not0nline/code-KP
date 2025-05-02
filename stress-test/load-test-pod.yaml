@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: load-test
+spec:
+  containers:
+  - name: load-test
+    image: python:3.9-slim
+    command: ["sleep", "infinity"]

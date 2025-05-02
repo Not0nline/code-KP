@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scaling-controller-combined
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scaling-controller-combined
+  template:
+    metadata:
+      labels:
+        app: scaling-controller-combined
+    spec:
+      serviceAccountName: predictive-scaler
+      containers:
+      - name: controller
+        image: 4dri4l/scaling-controller:latest
+        imagePullPolicy: Always
+        env:
+        - name: PREDICTIVE_SCALER_SERVICE
+          value: "http://predictive-scaler:5000/predict_combined"
+        - name: TARGET_DEPLOYMENT
+          value: "product-app-combined"
+        - name: TARGET_NAMESPACE
+          value: "default"
+        - name: POLL_INTERVAL
+          value: "30"
+        - name: SCALING_COOLDOWN
+          value: "60"
+        - name: SCALING_THRESHOLD
+          value: "0.5"
+        - name: DEBUG_MODE
+          value: "true"
+        - name: PROMETHEUS_SERVER
+          value: "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
