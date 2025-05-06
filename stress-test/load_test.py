@@ -31,29 +31,29 @@ DEFAULT_COMBINED_URL = "http://product-app-combined-service.default.svc.cluster.
 DEFAULT_PREDICTIVE_URL = "http://predictive-scaler.default.svc.cluster.local:5000"
 
 # Traffic pattern configuration - lower, more manageable load
-NORMAL_LOAD_RANGE = (2, 8)       # Reduced normal load
-PEAK_LOAD_RANGE = (10, 20)       # Reduced peak load
-DISTURBANCE_INTERVAL = 120       # Longer time between peaks (2 minutes)
-DISTURBANCE_DURATION = 30        # Duration of each disturbance in seconds
-VOLATILITY_FACTOR = 0.3          # Reduced volatility
+NORMAL_LOAD_RANGE = (15, 25)       # Reduced normal load
+PEAK_LOAD_RANGE = (30, 50)       # Reduced peak load
+DISTURBANCE_INTERVAL = 25       # Longer time between peaks (2 minutes)
+DISTURBANCE_DURATION = 10        # Duration of each disturbance in seconds
+VOLATILITY_FACTOR = 1         # Reduced volatility
 
-# NORMAL_LOAD_RANGE = (5, 15)       # Increased normal load range
-# PEAK_LOAD_RANGE = (20, 35)         # Increased peak load range
-# DISTURBANCE_INTERVAL = 60          # Shorter time between peaks (1 minute)
-# DISTURBANCE_DURATION = 30          # Duration of each disturbance in seconds
-# VOLATILITY_FACTOR = 0.5            # Increased volatility
+#NORMAL_LOAD_RANGE = (15, 30)       # Increased normal load range
+#PEAK_LOAD_RANGE = (40, 60)         # Increased peak load range
+#DISTURBANCE_INTERVAL = 60          # Shorter time between peaks (1 minute)
+#DISTURBANCE_DURATION = 30          # Duration of each disturbance in seconds
+#VOLATILITY_FACTOR = 0.5            # Increased volatility
 
 # Endpoint weights (probability distribution)
 ENDPOINT_WEIGHTS = {
-    "product_list": 0.45,         # 30% of requests to /product/list
-    "product_create": 0.35,       # 20% of requests to /product/create
-    # "product_get": 0.3,          # 30% of requests to /product/{id}
+    "product_list": 0.18,         # 30% of requests to /product/list
+    "product_create": 0.62,       # 20% of requests to /product/create
+    #"product_get": 0.30,          # 30% of requests to /product/{id}
     "load": 0.1,                 # 10% for load endpoint
     "health": 0.1                # 10% of requests to /health
 }
 
 # Request timeout (increased to accommodate load endpoint)
-REQUEST_TIMEOUT = 10  # seconds
+REQUEST_TIMEOUT = 60  # seconds
 
 class LoadTester:
     """
@@ -279,7 +279,7 @@ class LoadTester:
             "price": price
         }
 
-    
+
     def make_predictive_request(self, url, results_list):
         """
         Make a request specifically to the predictive scaler's /predict endpoint.
@@ -1034,6 +1034,3 @@ def main():
         tester.stop_event.set()
         tester.save_results()
         sys.exit(2)
-
-if __name__ == "__main__":
-    main()
