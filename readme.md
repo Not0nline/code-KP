@@ -5,24 +5,26 @@ This README provides the steps to deploy the Kubernetes components for the autos
 
 ## Repository Structure
 
+```text
 .
-├── autoscaler/               # Predictive Scaler application & K8s manifests
-├── monitoring/                # Monitoring setup (Grafana Dashboard JSON, example Service YAMLs) & K8s manifests
-│   ├── Monitoring.json       # Grafana Dashboard Import
+├── autoscaler/         # Predictive Scaler application & K8s manifests
+├── monitoring/         # Monitoring setup (Grafana Dashboard JSON, example Service YAMLs) & K8s manifests
+│   ├── Monitoring.json     # Grafana Dashboard Import
 │   ├── allow-monitoring.yaml # Example NetworkPolicy
 │   ├── grafana/
-│   │   └── grafana-service.yaml #(Example, likely managed by Helm)
+│   │   └── grafana-service.yaml # For exposing port externally for grafana
 │   └── prometheus/
-│       └── prometheus-service.yaml #(Example, likely managed by Helm)
-├── product-app/               # Product-App application & K8s manifests (including HPA and Combined setups)
+│       └── prometheus-service.yaml # For exposing port externally for prometheus
+├── product-app/        # Product-App application & K8s manifests (including HPA and Combined setups)
 │   ├── app.py
 │   ├── Dockerfile
 │   ├── combination/
 │   ├── controller/
 │   └── hpa/
-└── stress-test/              # Load testing scripts & K8s manifests
-├── load_test.py
-└── load-test-pod.yaml
+└── stress-test/        # Load testing scripts & K8s manifests
+    ├── load_test.py
+    └── load-test-pod.yaml
+```
 
 ## Prerequisites
 
@@ -38,7 +40,7 @@ This README provides the steps to deploy the Kubernetes components for the autos
 
 These steps assume you are running commands from the root of the repository. Most application components will be deployed to the `default` namespace, while monitoring components go into the `monitoring` namespace.
 
-**1. Configure Environment (If using K3s example)**
+### **1. Configure Environment (If using K3s example)**
 
 ```bash
 # Example for K3s - adjust path if needed
@@ -46,7 +48,7 @@ sudo chmod 644 /etc/rancher/k3s/k3s.yaml
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 ```
 
-2. Build and Push Docker Images
+### 2. Build and Push Docker Images
 
 * Product-App:
 ```bash
@@ -83,7 +85,7 @@ Replace your-dockerhub-username with your actual Docker Hub username or your con
 *   product-app/combination/scaling-controller-combined.yaml (if controller image is specified there)
 *   product-app/hpa/scaling-controller-hpa.yaml (if controller image is specified there)
 
-3. Deploy Monitoring (Prometheus & Grafana via Helm)
+### 3. Deploy Monitoring (Prometheus & Grafana via Helm)
 
 * Add Helm Repositories:
 ```bash
@@ -176,7 +178,7 @@ Access Grafana at http://localhost:3000.
 
 
 
-4. Deploy the Predictive Scaler
+### 4. Deploy the Predictive Scaler
 
 ```bash
 # Ensure ServiceAccount/RBAC are applied first
@@ -192,7 +194,7 @@ kubectl apply -f autoscaler/predictive-scaler-servicemonitor.yaml -n monitoring
 
 Note: Ensure the predictive-scaler-servicemonitor.yaml file contains the label release: prometheus under metadata.labels for the Helm-installed Prometheus Operator to discover it.
 
-5. Deploy the Product Application and Autoscaling Configurations
+### 5. Deploy the Product Application and Autoscaling Configurations
 
 Choose one of the following configurations (HPA or Combined) to deploy at a time.
 
@@ -235,7 +237,7 @@ kubectl apply -f product-app/combination/scaling-controller-combined.yaml -n def
 
 Note: Ensure the product-app-*-servicemonitor.yaml files contain the label release: prometheus under metadata.labels for the Helm-installed Prometheus Operator to discover them.
 
-6. Deploy and Run Stress Test
+### 6. Deploy and Run Stress Test
 
 * Deploy the load test pod:
 
