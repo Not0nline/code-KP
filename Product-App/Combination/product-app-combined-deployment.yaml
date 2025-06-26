@@ -15,6 +15,9 @@ spec:
       containers:
       - name: product-app
         image: 4drial/product-app:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - "gunicorn --workers ${GUNICORN_WORKERS:-4} --bind 0.0.0.0:5000 --timeout 10 app:app"
         ports:
         - name: http-metrics
           containerPort: 5000

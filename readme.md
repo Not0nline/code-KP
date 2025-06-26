@@ -34,7 +34,7 @@ This README provides the steps to deploy the Kubernetes components for the autos
 *   Docker installed and running (if you need to build the container images).
 *   A StorageClass available in your cluster (e.g., `local-path` was used in the script). Adjust storage settings if using a different StorageClass.
 *   Internet access from your cluster nodes for Helm chart downloads and image pulls.
-*   **Environment Specific:** You will need to replace `"ip-172-31-27-69"` in the Helm commands with a valid node hostname selector for your environment if you want to pin Prometheus/Grafana to specific nodes. You might also need to adjust StorageClass names and sizes. Set `KUBECONFIG` if necessary (`export KUBECONFIG=/path/to/your/kubeconfig`).
+*   **Environment Specific:** You will need to replace `"ip-[your plblic ip]"` in the Helm commands with a valid node hostname selector for your environment if you want to pin Prometheus/Grafana to specific nodes. You might also need to adjust StorageClass names and sizes. Set `KUBECONFIG` if necessary (`export KUBECONFIG=/path/to/your/kubeconfig`).
 
 ## Deployment Steps
 
@@ -124,7 +124,7 @@ EOF
 # The serviceMonitorSelector config ensures Prometheus finds ServiceMonitors with the 'release=prometheus' label
 helm install prometheus prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
-  --set prometheus.prometheusSpec.nodeSelector."kubernetes\.io/hostname"="ip-172-31-27-69" \
+  --set prometheus.prometheusSpec.nodeSelector."kubernetes\.io/hostname"="ip-54-208-56-43" \
   --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage=5Gi \
   --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName=local-path \
   --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.accessModes[0]=ReadWriteOnce \
@@ -140,7 +140,7 @@ helm upgrade --install grafana grafana/grafana \
   --namespace monitoring \
   --set persistence.enabled=true \
   --set persistence.existingClaim=grafana \
-  --set nodeSelector."kubernetes\.io/hostname"="ip-172-31-27-69"
+  --set nodeSelector."kubernetes\.io/hostname"="ip-54-208-56-43"
 ```
 
 * Apply Network Policy (Optional - if needed for Prometheus scraping):
