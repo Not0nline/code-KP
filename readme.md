@@ -7,7 +7,7 @@ This README provides the steps to deploy the Kubernetes components for the autos
 
 ```text
 .
-├── autoscaler/         # Predictive Scaler application & K8s manifests
+├── Autoscaler/         # Predictive Scaler application & K8s manifests
 ├── monitoring/         # Monitoring setup (Grafana Dashboard JSON, example Service YAMLs) & K8s manifests
 │   ├── Monitoring.json     # Grafana Dashboard Import
 │   ├── allow-monitoring.yaml # Example NetworkPolicy
@@ -79,7 +79,7 @@ cd ../..
 ```
 
 Replace your-dockerhub-username with your actual Docker Hub username or your container registry path. Crucially, update the image names in the following YAML files to match the images you just pushed:
-*   autoscaler/predictive-scaler-deployment.yaml
+*   Autoscaler/predictive-scaler-deployment.yaml
 *   product-app/hpa/product-app-hpa.yaml (or similar Deployment file in HPA)
 *   product-app/combination/product-app-combined-deployment.yaml
 *   product-app/combination/scaling-controller-combined.yaml (if controller image is specified there)
@@ -182,14 +182,14 @@ Access Grafana at http://localhost:3000.
 
 ```bash
 # Ensure ServiceAccount/RBAC are applied first
-kubectl apply -f autoscaler/predictive-scaler-serviceaccount.yaml -n default
-kubectl apply -f autoscaler/predictive-scaler-rbac.yaml -n default
-kubectl apply -f autoscaler/predictive-scaler-service.yaml -n default
-kubectl apply -f autoscaler/predictive-scaler-deployment.yaml -n default
+kubectl apply -f Autoscaler/predictive-scaler-serviceaccount.yaml -n default
+kubectl apply -f Autoscaler/predictive-scaler-rbac.yaml -n default
+kubectl apply -f Autoscaler/predictive-scaler-service.yaml -n default
+kubectl apply -f Autoscaler/predictive-scaler-deployment.yaml -n default
 
 # Apply the ServiceMonitor - Ensure it has 'release: prometheus' label inside the YAML
 # Apply it to the monitoring namespace so Prometheus Operator finds it
-kubectl apply -f autoscaler/predictive-scaler-servicemonitor.yaml -n monitoring
+kubectl apply -f Autoscaler/predictive-scaler-servicemonitor.yaml -n monitoring
 ```
 
 Note: Ensure the predictive-scaler-servicemonitor.yaml file contains the label release: prometheus under metadata.labels for the Helm-installed Prometheus Operator to discover it.
