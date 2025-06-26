@@ -15,7 +15,7 @@ This README provides the steps to deploy the Kubernetes components for the autos
 │   │   └── grafana-service.yaml # For exposing port externally for grafana
 │   └── prometheus/
 │       └── prometheus-service.yaml # For exposing port externally for prometheus
-├── product-app/        # Product-App application & K8s manifests (including HPA and Combined setups)
+├── Product-App/        # Product-App application & K8s manifests (including HPA and Combined setups)
 │   ├── app.py
 │   ├── Dockerfile
 │   ├── combination/
@@ -70,7 +70,7 @@ cd ..
 
 * Scaling Controller (for Combined Approach):
 ```bash
-cd product-app/controller
+cd Product-App/controller
 # Ensure the Dockerfile here is named 'Dockerfile'
 docker build -t your-dockerhub-username/scaling-controller:latest .
 # docker login your-registry.com # Optional: login if needed
@@ -80,10 +80,10 @@ cd ../..
 
 Replace your-dockerhub-username with your actual Docker Hub username or your container registry path. Crucially, update the image names in the following YAML files to match the images you just pushed:
 *   Autoscaler/predictive-scaler-deployment.yaml
-*   product-app/hpa/product-app-hpa.yaml (or similar Deployment file in HPA)
-*   product-app/combination/product-app-combined-deployment.yaml
-*   product-app/combination/scaling-controller-combined.yaml (if controller image is specified there)
-*   product-app/hpa/scaling-controller-hpa.yaml (if controller image is specified there)
+*   Product-App/hpa/product-app-hpa.yaml (or similar Deployment file in HPA)
+*   Product-App/combination/product-app-combined-deployment.yaml
+*   Product-App/combination/scaling-controller-combined.yaml (if controller image is specified there)
+*   Product-App/hpa/scaling-controller-hpa.yaml (if controller image is specified there)
 
 ### 3. Deploy Monitoring (Prometheus & Grafana via Helm)
 
@@ -202,36 +202,36 @@ Choose one of the following configurations (HPA or Combined) to deploy at a time
 
 ```bash
 # Deploy Product App specific resources for HPA
-kubectl apply -f product-app/hpa/product-app-hpa-service.yaml -n default
-kubectl apply -f product-app/hpa/product-app-hpa.yaml -n default # Deployment
-kubectl apply -f product-app/hpa/product-app-hpa-hpa.yaml -n default # HPA object
+kubectl apply -f Product-App/hpa/product-app-hpa-service.yaml -n default
+kubectl apply -f Product-App/hpa/product-app-hpa.yaml -n default # Deployment
+kubectl apply -f Product-App/hpa/product-app-hpa-hpa.yaml -n default # HPA object
 # Apply the ServiceMonitor - Ensure it has 'release: prometheus' label inside the YAML
 # Apply it to the monitoring namespace
-kubectl apply -f product-app/hpa/product-app-hpa-servicemonitor.yaml -n monitoring
+kubectl apply -f Product-App/hpa/product-app-hpa-servicemonitor.yaml -n monitoring
 
 # Optional: Deploy the HPA-specific controller RBAC/Deployment if needed
-# kubectl apply -f product-app/controller/controller-rbac.yaml -n default # Add if RBAC needed for HPA controller
-# kubectl apply -f product-app/hpa/scaling-controller-hpa.yaml -n default
+# kubectl apply -f Product-App/controller/controller-rbac.yaml -n default # Add if RBAC needed for HPA controller
+# kubectl apply -f Product-App/hpa/scaling-controller-hpa.yaml -n default
 ```
 
 * Option B: Deploy Product-App with Combined Approach
 
 ```bash
 # Apply RBAC for the Scaling Controller
-kubectl apply -f product-app/controller/controller-rbac.yaml -n default
+kubectl apply -f Product-App/controller/controller-rbac.yaml -n default
 
 # Create ConfigMap for the controller code (if using ConfigMap-based deployment)
-# kubectl apply -f product-app/controller/scaling-controller-code-configmap.yaml -n default
+# kubectl apply -f Product-App/controller/scaling-controller-code-configmap.yaml -n default
 
 # Deploy Product App specific resources for Combined
-kubectl apply -f product-app/combination/product-app-combined-service.yaml -n default
-kubectl apply -f product-app/combination/product-app-combined-deployment.yaml -n default
+kubectl apply -f Product-App/combination/product-app-combined-service.yaml -n default
+kubectl apply -f Product-App/combination/product-app-combined-deployment.yaml -n default
 # Apply the ServiceMonitor - Ensure it has 'release: prometheus' label inside the YAML
 # Apply it to the monitoring namespace
-kubectl apply -f product-app/combination/product-app-combined-servicemonitor.yaml -n monitoring
+kubectl apply -f Product-App/combination/product-app-combined-servicemonitor.yaml -n monitoring
 
 # Deploy the Combined scaling controller Deployment
-kubectl apply -f product-app/combination/scaling-controller-combined.yaml -n default
+kubectl apply -f Product-App/combination/scaling-controller-combined.yaml -n default
 ```
 
 
