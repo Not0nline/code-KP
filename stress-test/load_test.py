@@ -45,8 +45,8 @@ VOLATILITY_FACTOR = 1         # Reduced volatility
 
 # Endpoint weights (probability distribution)
 ENDPOINT_WEIGHTS = {
-    "product_list": 0.18,         # 30% of requests to /product/list
-    "product_create": 0.62,       # 20% of requests to /product/create
+    "product_list": 0.45,         # 30% of requests to /product/list
+    "product_create": 0.35,       # 20% of requests to /product/create
     #"product_get": 0.30,          # 30% of requests to /product/{id}
     "load": 0.1,                 # 10% for load endpoint
     "health": 0.1                # 10% of requests to /health
