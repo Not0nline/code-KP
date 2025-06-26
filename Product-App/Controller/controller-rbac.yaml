@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployment-scaler # Name of the Role - can be anything descriptive
+  namespace: default # This Role is for resources within the 'default' namespace
+rules:
+- apiGroups: ["apps"] # The API group that contains Deployments
+  resources: ["deployments/scale"] # The specific subresource for scaling Deployments
+  verbs: ["patch", "update"] # The permissions needed (patch and update for scaling)
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: predictive-scaler-deployment-scaler # Name of the RoleBinding - can be anything descriptive
+  namespace: default # This RoleBinding is created in the 'default' namespace
+subjects:
+- kind: ServiceAccount
+  name: predictive-scaler # <--- THIS MATCHES THE SERVICE ACCOUNT NAME FROM YOUR ERROR LOGS
+  namespace: default # <--- THIS MATCHES THE SERVICE ACCOUNT NAMESPACE
+roleRef:
+  kind: Role
+  name: deployment-scaler # Refers to the Role defined above
+  apiGroup: rbac.authorization.k8s.io # API group for RBAC resources
