@@ -81,8 +81,8 @@ cd ../..
 Replace your-dockerhub-username with your actual Docker Hub username or your container registry path. Crucially, update the image names in the following YAML files to match the images you just pushed:
 *   Autoscaler/predictive-scaler-deployment.yaml
 *   Product-App/hpa/product-app-hpa.yaml (or similar Deployment file in HPA)
-*   Product-App/combination/product-app-combined-deployment.yaml
-*   Product-App/combination/scaling-controller-combined.yaml (if controller image is specified there)
+*   Product-App/Combination/product-app-combined-deployment.yaml
+*   Product-App/Combination/scaling-controller-combined.yaml (if controller image is specified there)
 *   Product-App/hpa/scaling-controller-hpa.yaml (if controller image is specified there)
 
 ### 3. Deploy Monitoring (Prometheus & Grafana via Helm)
@@ -224,14 +224,14 @@ kubectl apply -f Product-App/controller/controller-rbac.yaml -n default
 # kubectl apply -f Product-App/controller/scaling-controller-code-configmap.yaml -n default
 
 # Deploy Product App specific resources for Combined
-kubectl apply -f Product-App/combination/product-app-combined-service.yaml -n default
-kubectl apply -f Product-App/combination/product-app-combined-deployment.yaml -n default
+kubectl apply -f Product-App/Combination/product-app-combined-service.yaml -n default
+kubectl apply -f Product-App/Combination/product-app-combined-deployment.yaml -n default
 # Apply the ServiceMonitor - Ensure it has 'release: prometheus' label inside the YAML
 # Apply it to the monitoring namespace
-kubectl apply -f Product-App/combination/product-app-combined-servicemonitor.yaml -n monitoring
+kubectl apply -f Product-App/Combination/product-app-combined-servicemonitor.yaml -n monitoring
 
 # Deploy the Combined scaling controller Deployment
-kubectl apply -f Product-App/combination/scaling-controller-combined.yaml -n default
+kubectl apply -f Product-App/Combination/scaling-controller-combined.yaml -n default
 ```
 
 
