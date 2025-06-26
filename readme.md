@@ -8,7 +8,7 @@ This README provides the steps to deploy the Kubernetes components for the autos
 ```text
 .
 ├── Autoscaler/         # Predictive Scaler application & K8s manifests
-├── monitoring/         # Monitoring setup (Grafana Dashboard JSON, example Service YAMLs) & K8s manifests
+├── Monitoring/         # Monitoring setup (Grafana Dashboard JSON, example Service YAMLs) & K8s manifests
 │   ├── Monitoring.json     # Grafana Dashboard Import
 │   ├── allow-monitoring.yaml # Example NetworkPolicy
 │   ├── grafana/
@@ -80,10 +80,10 @@ cd ../..
 
 Replace your-dockerhub-username with your actual Docker Hub username or your container registry path. Crucially, update the image names in the following YAML files to match the images you just pushed:
 *   Autoscaler/predictive-scaler-deployment.yaml
-*   Product-App/hpa/product-app-hpa.yaml (or similar Deployment file in HPA)
+*   Product-App/HPA/product-app-hpa.yaml (or similar Deployment file in HPA)
 *   Product-App/Combination/product-app-combined-deployment.yaml
 *   Product-App/Combination/scaling-controller-combined.yaml (if controller image is specified there)
-*   Product-App/hpa/scaling-controller-hpa.yaml (if controller image is specified there)
+*   Product-App/HPA/scaling-controller-hpa.yaml (if controller image is specified there)
 
 ### 3. Deploy Monitoring (Prometheus & Grafana via Helm)
 
@@ -145,10 +145,10 @@ helm upgrade --install grafana grafana/grafana \
 
 * Apply Network Policy (Optional - if needed for Prometheus scraping):
     
-    - Review monitoring/allow-monitoring.yaml and apply if necessary for your cluster's network setup. This policy might allow pods in the monitoring namespace egress access.
+    - Review Monitoring/allow-monitoring.yaml and apply if necessary for your cluster's network setup. This policy might allow pods in the monitoring namespace egress access.
 
 ```bash
-# kubectl apply -f monitoring/allow-monitoring.yaml -n default # Apply to default namespace if needed
+# kubectl apply -f Monitoring/allow-monitoring.yaml -n default # Apply to default namespace if needed
 ```
 
 * Import Grafana Dashboard:
@@ -174,7 +174,7 @@ kubectl port-forward --namespace monitoring svc/grafana 3000:80
 Access Grafana at http://localhost:3000.
 - Log in with username admin and the retrieved password.
 
-- Go to Dashboards -> Import -> Upload JSON file and upload monitoring/Monitoring.json.
+- Go to Dashboards -> Import -> Upload JSON file and upload Monitoring/Monitoring.json.
 
 
 
@@ -202,26 +202,26 @@ Choose one of the following configurations (HPA or Combined) to deploy at a time
 
 ```bash
 # Deploy Product App specific resources for HPA
-kubectl apply -f Product-App/hpa/product-app-hpa-service.yaml -n default
-kubectl apply -f Product-App/hpa/product-app-hpa.yaml -n default # Deployment
-kubectl apply -f Product-App/hpa/product-app-hpa-hpa.yaml -n default # HPA object
+kubectl apply -f Product-App/HPA/product-app-hpa-service.yaml -n default
+kubectl apply -f Product-App/HPA/product-app-hpa.yaml -n default # Deployment
+kubectl apply -f Product-App/HPA/product-app-hpa-hpa.yaml -n default # HPA object
 # Apply the ServiceMonitor - Ensure it has 'release: prometheus' label inside the YAML
 # Apply it to the monitoring namespace
-kubectl apply -f Product-App/hpa/product-app-hpa-servicemonitor.yaml -n monitoring
+kubectl apply -f Product-App/HPA/product-app-hpa-servicemonitor.yaml -n monitoring
 
 # Optional: Deploy the HPA-specific controller RBAC/Deployment if needed
-# kubectl apply -f Product-App/controller/controller-rbac.yaml -n default # Add if RBAC needed for HPA controller
-# kubectl apply -f Product-App/hpa/scaling-controller-hpa.yaml -n default
+# kubectl apply -f Product-App/Controller/controller-rbac.yaml -n default # Add if RBAC needed for HPA controller
+# kubectl apply -f Product-App/HPA/scaling-controller-hpa.yaml -n default
 ```
 
 * Option B: Deploy Product-App with Combined Approach
 
 ```bash
 # Apply RBAC for the Scaling Controller
-kubectl apply -f Product-App/controller/controller-rbac.yaml -n default
+kubectl apply -f Product-App/Controller/controller-rbac.yaml -n default
 
 # Create ConfigMap for the controller code (if using ConfigMap-based deployment)
-# kubectl apply -f Product-App/controller/scaling-controller-code-configmap.yaml -n default
+# kubectl apply -f Product-App/Controller/scaling-controller-code-configmap.yaml -n default
 
 # Deploy Product App specific resources for Combined
 kubectl apply -f Product-App/Combination/product-app-combined-service.yaml -n default
