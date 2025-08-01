@@ -207,7 +207,7 @@ kubectl apply -f Product-App/HPA/product-app-hpa.yaml -n default # Deployment
 kubectl apply -f Product-App/HPA/product-app-hpa-hpa.yaml -n default # HPA object
 # Apply the ServiceMonitor - Ensure it has 'release: prometheus' label inside the YAML
 # Apply it to the monitoring namespace
-kubectl apply -f Product-App/HPA/product-app-hpa-servicemonitor.yaml -n monitoring
+kubectl apply -f Product-App/HPA/product-app-servicemonitor.yaml -n monitoring
 
 # Optional: Deploy the HPA-specific controller RBAC/Deployment if needed
 # kubectl apply -f Product-App/Controller/controller-rbac.yaml -n default # Add if RBAC needed for HPA controller
