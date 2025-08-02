@@ -124,30 +124,24 @@ spec:
 EOF
 ```
 
-* Install Prometheus (kube-prometheus-stack):
+* Install Prometheus and grafana(kube-prometheus-stack):
 ```bash
 # *** Adjust nodeSelector, storage requests/className as needed for your environment ***
 # The serviceMonitorSelector config ensures Prometheus finds ServiceMonitors with the 'release=prometheus' label
 helm install prometheus prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
-  --set prometheus.prometheusSpec.nodeSelector."kubernetes\.io/hostname"="ip-54-208-56-43" \
+  --set prometheus.prometheusSpec.nodeSelector."kubernetes\.io/hostname"="ip-44-221-13-199" \
   --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage=5Gi \
   --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName=local-path \
   --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.accessModes[0]=ReadWriteOnce \
+  --set grafana.persistence.enabled=true \
+  --set grafana.persistence.existingClaim=grafana-pvc \
+  --set grafana.nodeSelector."kubernetes\.io/hostname"="ip-44-221-13-199" \
   --set kubeStateMetrics.enabled=true \
   --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
   --set prometheus.prometheusSpec.serviceMonitorSelector.matchLabels.release=prometheus
 ```
 
-* Install Grafana:
-```bash
-# *** Adjust nodeSelector as needed for your environment ***
-helm upgrade --install grafana grafana/grafana \
-  --namespace monitoring \
-  --set persistence.enabled=true \
-  --set persistence.existingClaim=grafana \
-  --set nodeSelector."kubernetes\.io/hostname"="ip-54-208-56-43"
-```
 
 * Apply Network Policy (Optional - if needed for Prometheus scraping):
     
