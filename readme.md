@@ -31,6 +31,13 @@ This README provides the steps to deploy the Kubernetes components for the autos
 *   A running Kubernetes cluster (Tested with K3s).
 *   `kubectl` configured to communicate with your cluster.
 *   `helm` v3 installed.
+
+    how to install helm:
+
+    ```bash
+    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    ```
+
 *   Docker installed and running (if you need to build the container images).
 *   A StorageClass available in your cluster (e.g., `local-path` was used in the script). Adjust storage settings if using a different StorageClass.
 *   Internet access from your cluster nodes for Helm chart downloads and image pulls.
