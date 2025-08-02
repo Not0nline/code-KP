@@ -156,9 +156,7 @@ helm install prometheus prometheus-community/kube-prometheus-stack \
 - Get the Grafana admin password:
 
 ```bash
-kubectl get secret --namespace monitoring grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
-# If using kube-prometheus-stack's Grafana, it might be:
-# kubectl get secret --namespace monitoring prometheus-grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
+kubectl get secret --namespace monitoring prometheus-grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
 ```
 
 
