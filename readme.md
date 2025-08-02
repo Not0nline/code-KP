@@ -90,7 +90,6 @@ Replace your-dockerhub-username with your actual Docker Hub username or your con
 * Add Helm Repositories:
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo add grafana https://grafana.github.io/helm-charts
 helm repo update
 ```
 
