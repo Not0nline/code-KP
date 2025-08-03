@@ -1,22 +1,21 @@
+# predictive-scaler-rbac.yaml (UPDATED)
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: predictive-scaler-sa
-  namespace: default # Or the namespace where predictive-scaler runs
-
+  namespace: default
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: predictive-scaler-metrics-reader
 rules:
-- apiGroups: [""] # Core API group for pods
-  resources: ["pods"]
-  verbs: ["get", "list", "watch"] # Need list for label selector, get for requests
-- apiGroups: ["metrics.k8s.io"] # Metrics API group
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["metrics.k8s.io"]
   resources: ["pods"]
   verbs: ["get", "list"]
-
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -29,4 +28,4 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: predictive-scaler-sa
-  namespace: default # Must match the ServiceAccount's namespace
+  namespace: default

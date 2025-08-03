@@ -1,3 +1,4 @@
+# scaling-controller-code-configmap.yaml (UPDATED)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -12,14 +13,14 @@ spec:
       labels:
         app: scaling-controller
     spec:
-      serviceAccountName: predictive-scaler
+      serviceAccountName: scaling-controller-sa  # CHANGED!
       containers:
       - name: controller
         image: 4dri4l/scaling-controller:latest
         imagePullPolicy: Always
         env:
         - name: PREDICTIVE_SCALER_SERVICE
-          value: "http://predictive-scaler:5000/predict"
+          value: "http://predictive-scaler:5000"  # Removed /predict
         - name: TARGET_DEPLOYMENT
           value: "product-app"
         - name: TARGET_NAMESPACE
