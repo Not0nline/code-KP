@@ -1,4 +1,4 @@
-# controller-rbac.yaml (COMPLETELY REPLACED)
+# controller-rbac.yaml
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -13,10 +13,10 @@ metadata:
 rules:
 - apiGroups: ["apps"]
   resources: ["deployments"]
-  verbs: ["get", "list", "watch"]  # Need to read deployment info
+  verbs: ["get", "list", "watch", "update", "patch"]
 - apiGroups: ["apps"]
   resources: ["deployments/scale"]
-  verbs: ["get", "update", "patch"]  # Need get to read current scale
+  verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
