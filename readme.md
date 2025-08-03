@@ -1,4 +1,3 @@
-
 # Kubernetes Autoscaling Setup - Reproduction Steps
 
 This README provides the steps to deploy the Kubernetes components for the autoscaling comparison project (Predictive, HPA, Combined), using Helm for Prometheus and Grafana installation.
@@ -28,19 +27,20 @@ This README provides the steps to deploy the Kubernetes components for the autos
 
 ## Prerequisites
 
-*   A running Kubernetes cluster (Tested with K3s).
-*   `kubectl` configured to communicate with your cluster.
-*   `helm` v3 installed.
-*   Docker installed and running (if you need to build the container images).
-*   A StorageClass available in your cluster (e.g., `local-path` was used in the script). Adjust storage settings if using a different StorageClass.
-*   Internet access from your cluster nodes for Helm chart downloads and image pulls.
-*   **Environment Specific:** You will need to replace `"ip-[your plblic ip]"` in the Helm commands with a valid node hostname selector for your environment if you want to pin Prometheus/Grafana to specific nodes. You might also need to adjust StorageClass names and sizes. Set `KUBECONFIG` if necessary (`export KUBECONFIG=/path/to/your/kubeconfig`).
+- A running Kubernetes cluster (Tested with K3s)
+- `kubectl` configured to communicate with your cluster
+- `helm` v3 installed
+- Docker installed and running (if you need to build the container images)
+- A StorageClass available in your cluster (e.g., `local-path` for K3s)
+- Internet access from your cluster nodes for Helm chart downloads and image pulls
 
-## Deployment Steps
+### Install Helm
 
-These steps assume you are running commands from the root of the repository. Most application components will be deployed to the `default` namespace, while monitoring components go into the `monitoring` namespace.
+```bash
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+```
 
-### **1. Configure Environment (If using K3s example)**
+### Environment Setup (K3s example)
 
 ```bash
 # Example for K3s - adjust path if needed
@@ -48,220 +48,273 @@ sudo chmod 644 /etc/rancher/k3s/k3s.yaml
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 ```
 
-### 2. Build and Push Docker Images
+**Important:** Replace `ip-44-221-13-199` in the commands below with your actual node hostname. You can find it using:
 
-* Product-App:
 ```bash
-cd product-app
+kubectl get nodes -o wide
+```
+
+## Deployment Steps
+
+### 1. Build and Push Docker Images 
+
+**Product-App:**
+```bash
+cd Product-App
 docker build -t your-dockerhub-username/product-app:latest .
-# docker login your-registry.com # Optional: login if needed
 docker push your-dockerhub-username/product-app:latest
 cd ..
 ```
 
-* Predictive Autoscaler:
+**Predictive Autoscaler:**
 ```bash
-cd autoscaler
+cd Autoscaler
 docker build -t your-dockerhub-username/predictive-scaler:latest .
-# docker login your-registry.com # Optional: login if needed
 docker push your-dockerhub-username/predictive-scaler:latest
 cd ..
 ```
 
-* Scaling Controller (for Combined Approach):
+**Scaling Controller (for Combined Approach):**
 ```bash
 cd Product-App/controller
-# Ensure the Dockerfile here is named 'Dockerfile'
 docker build -t your-dockerhub-username/scaling-controller:latest .
-# docker login your-registry.com # Optional: login if needed
 docker push your-dockerhub-username/scaling-controller:latest
 cd ../..
 ```
 
-Replace your-dockerhub-username with your actual Docker Hub username or your container registry path. Crucially, update the image names in the following YAML files to match the images you just pushed:
-*   Autoscaler/predictive-scaler-deployment.yaml
-*   Product-App/HPA/product-app-hpa.yaml (or similar Deployment file in HPA)
-*   Product-App/Combination/product-app-combined-deployment.yaml
-*   Product-App/Combination/scaling-controller-combined.yaml (if controller image is specified there)
-*   Product-App/HPA/scaling-controller-hpa.yaml (if controller image is specified there)
+> **Note:** Update the image names in all YAML deployment files to match your pushed images:
+> - `Autoscaler/predictive-scaler-deployment.yaml`
+> - `Product-App/HPA/product-app-hpa.yaml`
+> - `Product-App/Combination/product-app-combined-deployment.yaml`
+> - `Product-App/Combination/scaling-controller-combined.yaml`
 
-### 3. Deploy Monitoring (Prometheus & Grafana via Helm)
+### 2. Deploy Monitoring (Prometheus & Grafana)
 
-* Add Helm Repositories:
+**Add Helm repositories:**
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo add grafana https://grafana.github.io/helm-charts
 helm repo update
 ```
 
-* Create Monitoring Namespace:
+**Create monitoring namespace:**
 ```bash
 kubectl create namespace monitoring
 ```
 
-* Create Grafana Persistent Volume Claim:
+**Create Grafana PVC:**
 ```bash
-# Adjust storage size and storageClassName if needed
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: grafana
+  name: grafana-pvc
   namespace: monitoring
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 2Gi # Adjust size if needed
-  storageClassName: local-path # IMPORTANT: Use a StorageClass available in your cluster
+      storage: 2Gi
+  storageClassName: local-path
 EOF
 ```
 
-* Install Prometheus (kube-prometheus-stack):
+**Install kube-prometheus-stack (includes both Prometheus and Grafana):**
 ```bash
-# *** Adjust nodeSelector, storage requests/className as needed for your environment ***
-# The serviceMonitorSelector config ensures Prometheus finds ServiceMonitors with the 'release=prometheus' label
 helm install prometheus prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
-  --set prometheus.prometheusSpec.nodeSelector."kubernetes\.io/hostname"="ip-54-208-56-43" \
+  --set prometheus.prometheusSpec.nodeSelector."kubernetes\.io/hostname"="YOUR-NODE-HOSTNAME" \
   --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage=5Gi \
   --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName=local-path \
   --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.accessModes[0]=ReadWriteOnce \
+  --set grafana.persistence.enabled=true \
+  --set grafana.persistence.existingClaim=grafana-pvc \
+  --set grafana.nodeSelector."kubernetes\.io/hostname"="YOUR-NODE-HOSTNAME" \
   --set kubeStateMetrics.enabled=true \
   --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
   --set prometheus.prometheusSpec.serviceMonitorSelector.matchLabels.release=prometheus
 ```
 
-* Install Grafana:
+**Verify installation:**
 ```bash
-# *** Adjust nodeSelector as needed for your environment ***
-helm upgrade --install grafana grafana/grafana \
-  --namespace monitoring \
-  --set persistence.enabled=true \
-  --set persistence.existingClaim=grafana \
-  --set nodeSelector."kubernetes\.io/hostname"="ip-54-208-56-43"
+kubectl get pods -n monitoring
+kubectl get svc -n monitoring
 ```
 
-* Apply Network Policy (Optional - if needed for Prometheus scraping):
-    
-    - Review Monitoring/allow-monitoring.yaml and apply if necessary for your cluster's network setup. This policy might allow pods in the monitoring namespace egress access.
-
+**Get Grafana admin password:**
 ```bash
-# kubectl apply -f Monitoring/allow-monitoring.yaml -n default # Apply to default namespace if needed
+kubectl get secret --namespace monitoring prometheus-grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
 ```
 
-* Import Grafana Dashboard:
+### 3. Expose Grafana and Prometheus (Optional)
 
-- Get the Grafana admin password:
-
+**Expose Grafana:**
 ```bash
-kubectl get secret --namespace monitoring grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
-# If using kube-prometheus-stack's Grafana, it might be:
-# kubectl get secret --namespace monitoring prometheus-grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
+kubectl apply -f Monitoring/grafana/grafana-service.yaml
 ```
 
-
-- Access the Grafana UI (you might need to port-forward or use an Ingress):
-
+**Expose Prometheus:**
 ```bash
-# Example using port-forward:
-kubectl port-forward --namespace monitoring svc/grafana 3000:80
-# Or if using kube-prometheus-stack's Grafana:
-# kubectl port-forward --namespace monitoring svc/prometheus-grafana 3000:80
+kubectl apply -f Monitoring/prometheus/prometheus-service.yaml
 ```
 
-Access Grafana at http://localhost:3000.
-- Log in with username admin and the retrieved password.
+**Alternative - Port forwarding (might not work in AWS):**
+```bash
+# Grafana
+kubectl port-forward --namespace monitoring svc/prometheus-grafana 3000:80
 
-- Go to Dashboards -> Import -> Upload JSON file and upload Monitoring/Monitoring.json.
+# Prometheus
+kubectl port-forward --namespace monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090
+```
 
+### 4. Import Grafana Dashboard
 
+1. Access Grafana UI (http://localhost:3000 if using port-forward)
+2. Login with username `admin` and the password from step 2
+3. Go to **Dashboards** → **Import** → **Upload JSON file**
+4. Upload `Monitoring/Monitoring.json`
 
-### 4. Deploy the Predictive Scaler
+### 5. Deploy Predictive Scaler
 
 ```bash
-# Ensure ServiceAccount/RBAC are applied first
-kubectl apply -f Autoscaler/predictive-scaler-serviceaccount.yaml -n default
-kubectl apply -f Autoscaler/predictive-scaler-rbac.yaml -n default
-kubectl apply -f Autoscaler/predictive-scaler-service.yaml -n default
-kubectl apply -f Autoscaler/predictive-scaler-deployment.yaml -n default
+# Deploy RBAC and ServiceAccount
+kubectl apply -f Autoscaler/predictive-scaler-serviceaccount.yaml
+kubectl apply -f Autoscaler/predictive-scaler-rbac.yaml
 
-# Apply the ServiceMonitor - Ensure it has 'release: prometheus' label inside the YAML
-# Apply it to the monitoring namespace so Prometheus Operator finds it
+# Deploy Service and Deployment
+kubectl apply -f Autoscaler/predictive-scaler-service.yaml
+kubectl apply -f Autoscaler/predictive-scaler-deployment.yaml
+
+# Deploy ServiceMonitor (ensure it has 'release: prometheus' label)
 kubectl apply -f Autoscaler/predictive-scaler-servicemonitor.yaml -n monitoring
 ```
 
-Note: Ensure the predictive-scaler-servicemonitor.yaml file contains the label release: prometheus under metadata.labels for the Helm-installed Prometheus Operator to discover it.
+### 6. Deploy Product Application
 
-### 5. Deploy the Product Application and Autoscaling Configurations
+Choose **ONE** of the following options:
 
-Choose one of the following configurations (HPA or Combined) to deploy at a time.
-
-* Option A: Deploy Product-App with HPA
+#### Option A: HPA Setup
 
 ```bash
-# Deploy Product App specific resources for HPA
-kubectl apply -f Product-App/HPA/product-app-hpa-service.yaml -n default
-kubectl apply -f Product-App/HPA/product-app-hpa.yaml -n default # Deployment
-kubectl apply -f Product-App/HPA/product-app-hpa-hpa.yaml -n default # HPA object
-# Apply the ServiceMonitor - Ensure it has 'release: prometheus' label inside the YAML
-# Apply it to the monitoring namespace
-kubectl apply -f Product-App/HPA/product-app-hpa-servicemonitor.yaml -n monitoring
+# Deploy Product App with HPA
+kubectl apply -f Product-App/HPA/product-app-hpa-service.yaml
+kubectl apply -f Product-App/HPA/product-app-hpa.yaml
+kubectl apply -f Product-App/HPA/product-app-hpa-hpa.yaml
 
-# Optional: Deploy the HPA-specific controller RBAC/Deployment if needed
-# kubectl apply -f Product-App/Controller/controller-rbac.yaml -n default # Add if RBAC needed for HPA controller
-# kubectl apply -f Product-App/HPA/scaling-controller-hpa.yaml -n default
+# Deploy ServiceMonitor (ensure it has 'release: prometheus' label)
+kubectl apply -f Product-App/HPA/product-app-servicemonitor.yaml -n monitoring
+
+# Optional: HPA Controller
+# kubectl apply -f Product-App/Controller/controller-rbac.yaml
+# kubectl apply -f Product-App/HPA/scaling-controller-hpa.yaml
 ```
 
-* Option B: Deploy Product-App with Combined Approach
+#### Option B: Combined Approach
 
 ```bash
-# Apply RBAC for the Scaling Controller
-kubectl apply -f Product-App/Controller/controller-rbac.yaml -n default
+# Deploy RBAC for Scaling Controller
+kubectl apply -f Product-App/Controller/controller-rbac.yaml
 
-# Create ConfigMap for the controller code (if using ConfigMap-based deployment)
-# kubectl apply -f Product-App/Controller/scaling-controller-code-configmap.yaml -n default
+# Deploy Product App with Combined setup
+kubectl apply -f Product-App/Combination/product-app-combined-service.yaml
+kubectl apply -f Product-App/Combination/product-app-combined-deployment.yaml
 
-# Deploy Product App specific resources for Combined
-kubectl apply -f Product-App/Combination/product-app-combined-service.yaml -n default
-kubectl apply -f Product-App/Combination/product-app-combined-deployment.yaml -n default
-# Apply the ServiceMonitor - Ensure it has 'release: prometheus' label inside the YAML
-# Apply it to the monitoring namespace
+# Deploy ServiceMonitor (ensure it has 'release: prometheus' label)
 kubectl apply -f Product-App/Combination/product-app-combined-servicemonitor.yaml -n monitoring
 
-# Deploy the Combined scaling controller Deployment
-kubectl apply -f Product-App/Combination/scaling-controller-combined.yaml -n default
+# Deploy Combined Scaling Controller
+kubectl apply -f Product-App/Combination/scaling-controller-combined.yaml
 ```
 
+### 7. Deploy and Run Load Tests
 
-Note: Ensure the product-app-*-servicemonitor.yaml files contain the label release: prometheus under metadata.labels for the Helm-installed Prometheus Operator to discover them.
-
-### 6. Deploy and Run Stress Test
-
-* Deploy the load test pod:
-
+**Deploy load test pod:**
 ```bash
-kubectl apply -f stress-test/load-test-pod.yaml -n default
+kubectl apply -f stress-test/load-test-pod.yaml
 ```
 
-Wait for the pod to be in the Running state: kubectl get pod load-test -n default
-
-
-* Copy the script and install dependencies:
-
+**Wait for pod to be ready:**
 ```bash
-kubectl cp stress-test/load_test.py load-test:/load_test.py -n default
-kubectl exec -it load-test -n default -- pip install requests numpy pandas
+kubectl wait --for=condition=Ready pod/load-test --timeout=60s
 ```
 
-* Execute the load test script:
+**Copy test script and install dependencies:**
+```bash
+kubectl cp stress-test/load_test.py load-test:/load_test.py
+kubectl exec -it load-test -- pip install requests numpy pandas
+```
+
+**Run load test:**
+```bash
+# Basic test
+kubectl exec -it load-test -- python /load_test.py
+
+# Custom parameters (adjust based on your script)
+# kubectl exec -it load-test -- python /load_test.py --duration 1800 --target-service product-app-combined-service.default.svc.cluster.local
+```
+
+## Verification and Monitoring
+
+### Check Deployment Status
 
 ```bash
-# Example: Run with default settings (adjust script defaults if needed)
-kubectl exec -it load-test -n default -- python /load_test.py
+# Check all pods
+kubectl get pods --all-namespaces
 
-# Example: Run with specific parameters (check script for available args)
-# kubectl exec -it load-test -n default -- python /load_test.py --duration 1800 --target-service product-app-combined-service.default.svc.cluster.local
+# Check services
+kubectl get svc --all-namespaces
 
+# Check HPA status (if using HPA)
+kubectl get hpa
+
+# Check ServiceMonitors
+kubectl get servicemonitors -n monitoring
+```
+
+### Access Monitoring
+
+- **Grafana:** http://your-node-ip (if using LoadBalancer service) or port-forward to localhost:3000
+- **Prometheus:** http://your-node-ip:9090 (if using LoadBalancer service) or port-forward to localhost:9090
+
+### Troubleshooting
+
+**Check pod logs:**
+```bash
+kubectl logs -f deployment/predictive-scaler
+kubectl logs -f deployment/product-app-hpa  # or product-app-combined
+```
+
+**Check ServiceMonitor discovery:**
+```bash
+kubectl get servicemonitors -n monitoring -o yaml
+```
+
+**Verify Prometheus targets:**
+- Access Prometheus UI → Status → Targets
+- Ensure your services are listed and UP
+
+## Important Notes
+
+- Replace `YOUR-NODE-HOSTNAME` with your actual node hostname
+- Ensure all ServiceMonitor YAML files have `release: prometheus` label in metadata
+- Only deploy one Product-App configuration (HPA OR Combined) at a time
+- Storage class `local-path` is specific to K3s; adjust for other clusters
+- All application components deploy to `default` namespace, monitoring to `monitoring` namespace
+
+## Clean Up
+
+To remove all components:
+
+```bash
+# Remove Helm releases
+helm uninstall prometheus -n monitoring
+
+# Remove namespaces (this removes all resources in them)
+kubectl delete namespace monitoring
+
+# Remove default namespace resources
+kubectl delete -f Product-App/HPA/ --ignore-not-found=true
+kubectl delete -f Product-App/Combination/ --ignore-not-found=true
+kubectl delete -f Autoscaler/ --ignore-not-found=true
+kubectl delete -f stress-test/ --ignore-not-found=true
 ```
