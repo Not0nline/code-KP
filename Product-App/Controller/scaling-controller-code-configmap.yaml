@@ -20,7 +20,7 @@ spec:
         imagePullPolicy: Always
         env:
         - name: PREDICTIVE_SCALER_SERVICE
-          value: "http://predictive-scaler:5000"  # Removed /predict
+          value: "http://predictive-scaler:5000/predict_combined"  
         - name: TARGET_DEPLOYMENT
           value: "product-app"
         - name: TARGET_NAMESPACE
