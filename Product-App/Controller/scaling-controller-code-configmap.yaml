@@ -1,4 +1,3 @@
-# scaling-controller-code-configmap.yaml (UPDATED)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,19 +12,26 @@ spec:
       labels:
         app: scaling-controller
     spec:
-      serviceAccountName: scaling-controller-sa  # CHANGED!
+      serviceAccountName: predictive-scaler
       containers:
       - name: controller
         image: 4dri4l/scaling-controller:latest
         imagePullPolicy: Always
         env:
         - name: PREDICTIVE_SCALER_SERVICE
-          value: "http://predictive-scaler:5000/predict_combined"  
+          value: "http://predictive-scaler:5000"  # Fixed: just base URL
         - name: TARGET_DEPLOYMENT
-          value: "product-app"
+          value: "product-app-combined"  # Fixed: correct deployment name
         - name: TARGET_NAMESPACE
           value: "default"
         - name: POLL_INTERVAL
           value: "60"
         - name: PROMETHEUS_SERVER
           value: "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
