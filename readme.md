@@ -249,8 +249,8 @@ kubectl exec -it load-test -- pip install requests numpy pandas
 # Basic test
 kubectl exec -it load-test -- python /load_test.py
 
-# Custom parameters (adjust based on your script)
-# kubectl exec -it load-test -- python /load_test.py --duration 1800 --target-service product-app-combined-service.default.svc.cluster.local
+# Custom parameters (for picking which model to test)
+# kubectl exec -it load-test -- python /load_test.py --target [hpa/combined/both]
 ```
 
 ## Verification and Monitoring
