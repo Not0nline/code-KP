@@ -800,9 +800,9 @@ def parse_arguments():
     parser.add_argument('--output-dir', type=str, default='./load_test_results', help='Output directory for results')
     
     # Load pattern arguments
-    parser.add_argument('--normal-min', type=int, default=NORMAL_LOAD_RANGE, help=f'Minimum normal requests (default: {NORMAL_LOAD_RANGE})')
+    parser.add_argument('--normal-min', type=int, default=NORMAL_LOAD_RANGE[0], help=f'Minimum normal requests (default: {NORMAL_LOAD_RANGE[0]})')
     parser.add_argument('--normal-max', type=int, default=NORMAL_LOAD_RANGE[1], help=f'Maximum normal requests (default: {NORMAL_LOAD_RANGE[1]})')
-    parser.add_argument('--peak-min', type=int, default=PEAK_LOAD_RANGE, help=f'Minimum peak requests (default: {PEAK_LOAD_RANGE})')
+    parser.add_argument('--peak-min', type=int, default=PEAK_LOAD_RANGE[0], help=f'Minimum peak requests (default: {PEAK_LOAD_RANGE[0]})')
     parser.add_argument('--peak-max', type=int, default=PEAK_LOAD_RANGE[1], help=f'Maximum peak requests (default: {PEAK_LOAD_RANGE[1]})')
     parser.add_argument('--disturbance-interval', type=int, default=DISTURBANCE_INTERVAL, help=f'Seconds between disturbances (default: {DISTURBANCE_INTERVAL})')
     parser.add_argument('--disturbance-duration', type=int, default=DISTURBANCE_DURATION, help=f'Duration of each disturbance (default: {DISTURBANCE_DURATION} seconds)')
