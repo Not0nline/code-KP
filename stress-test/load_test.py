@@ -30,9 +30,16 @@ DEFAULT_HPA_URL = "http://product-app-hpa-service.default.svc.cluster.local"
 DEFAULT_COMBINED_URL = "http://product-app-combined-service.default.svc.cluster.local"
 DEFAULT_PREDICTIVE_URL = "http://predictive-scaler.default.svc.cluster.local:5000"
 
+# Test target configuration - Choose which services to test
+TEST_TARGETS = {
+    "hpa": False,        # Test HPA service
+    "combined": True,   # Test Combined service  
+    "predictive": True  # Test Predictive service
+}
+
 # Traffic pattern configuration – lower, more manageable load
-NORMAL_LOAD_RANGE = (15, 25)       # Normal load requests per second
-PEAK_LOAD_RANGE = (30, 50)         # Peak load requests per second
+NORMAL_LOAD_RANGE = (75, 100)       # Normal load requests per second
+PEAK_LOAD_RANGE = (175, 250)         # Peak load requests per second
 DISTURBANCE_INTERVAL = 25          # Seconds between peak disturbances (about 25 sec)
 DISTURBANCE_DURATION = 10          # Peak duration in seconds
 VOLATILITY_FACTOR = 1              # Volatility factor for minor spikes/dips
@@ -54,11 +61,12 @@ CPU_THRESHOLD = 3.0  # 3%
 
 class LoadTester:
     """
-    Load testing implementation that tests all application endpoints
+    Load testing implementation that tests selected application endpoints
     at a manageable load level using a moderately volatile traffic pattern.
     """
     def __init__(self, hpa_url, combined_url, predictive_url=None,
-                 duration=3600, output_dir="./load_test_results"):
+                 duration=3600, output_dir="./load_test_results",
+                 test_hpa=True, test_combined=True, test_predictive=True):
         """Initialize the load tester."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = os.path.join(output_dir, f"test_run_{timestamp}")
@@ -67,6 +75,11 @@ class LoadTester:
         self.predictive_url = predictive_url
         self.duration = duration
         self.stop_event = threading.Event()
+
+        # Test target flags
+        self.test_hpa = test_hpa
+        self.test_combined = test_combined
+        self.test_predictive = test_predictive and predictive_url is not None
 
         # Results storage
         self.hpa_results = []
@@ -88,6 +101,16 @@ class LoadTester:
 
         self.current_request_rate = 0
 
+        # Log which services will be tested
+        active_services = []
+        if self.test_hpa:
+            active_services.append("HPA")
+        if self.test_combined:
+            active_services.append("Combined")
+        if self.test_predictive:
+            active_services.append("Predictive")
+        
+        logger.info(f"Testing services: {', '.join(active_services)}")
         logger.info(f"Results will be saved to: {self.output_dir}")
 
     def generate_traffic_pattern(self):
@@ -237,7 +260,7 @@ class LoadTester:
         }
 
     def make_predictive_request(self, url, results_list):
-        """Send a GET request to the predictive scaler’s /predict endpoint."""
+        """Send a GET request to the predictive scaler's /predict endpoint."""
         endpoint = "/predict"
         full_url = f"{url}{endpoint}"
         try:
@@ -385,32 +408,46 @@ class LoadTester:
     def run_test(self):
         """
         Run the load test for the specified duration.
-        For each second, the number of requests is determined by the traffic pattern.
-        Results are stored to disk periodically.
+        Only tests the selected target services.
         """
         logger.info(f"Starting functional load test for {self.duration} seconds")
-        logger.info(f"HPA URL: {self.hpa_url}")
-        logger.info(f"Combined URL: {self.combined_url}")
-        if self.predictive_url:
+        
+        active_services = []
+        if self.test_hpa:
+            logger.info(f"HPA URL: {self.hpa_url}")
+            active_services.append("HPA")
+        if self.test_combined:
+            logger.info(f"Combined URL: {self.combined_url}")
+            active_services.append("Combined")
+        if self.test_predictive:
             logger.info(f"Predictive Scaler URL: {self.predictive_url}")
+            active_services.append("Predictive")
+            
+        logger.info(f"Active services: {', '.join(active_services)}")
+        
         self.request_pattern = self.generate_traffic_pattern()
         self.start_time = datetime.now()
         logger.info(f"Test started at {self.start_time.isoformat()}")
         logger.info(f"Testing endpoints with weights: {ENDPOINT_WEIGHTS}")
+        
         current_pattern_type = "NORMAL"
         rate_history = []
+        
         for second in range(self.duration):
             if self.stop_event.is_set():
                 logger.info("Stopping test early due to stop event")
                 break
+                
             request_count = self.request_pattern.get(second, 1)
             rate_history.append(request_count)
             if len(rate_history) > 120:
                 rate_history.pop(0)
             self.current_request_rate = request_count
+            
             is_disturbance = (second % DISTURBANCE_INTERVAL < DISTURBANCE_DURATION)
             current_time = datetime.now() + timedelta(seconds=second)
             is_business_hours = (9 <= current_time.hour < 17)
+            
             if is_disturbance and is_business_hours:
                 pattern_type = "BUSINESS_PEAK"
             elif is_disturbance:
@@ -419,72 +456,133 @@ class LoadTester:
                 pattern_type = "BUSINESS_NORMAL"
             else:
                 pattern_type = "NORMAL"
+                
             if pattern_type != current_pattern_type:
                 logger.info(f"Second {second}: Pattern changed from {current_pattern_type} to {pattern_type}")
                 current_pattern_type = pattern_type
-            hpa_thread = threading.Thread(
-                target=lambda: self.make_requests(
-                    self.hpa_url, second, request_count,
-                    self.hpa_results, self.hpa_products, self.hpa_lock, "HPA"
+
+            # Create threads only for selected services
+            threads = []
+            
+            if self.test_hpa:
+                hpa_thread = threading.Thread(
+                    target=lambda: self.make_requests(
+                        self.hpa_url, second, request_count,
+                        self.hpa_results, self.hpa_products, self.hpa_lock, "HPA"
+                    )
                 )
-            )
-            combined_thread = threading.Thread(
-                target=lambda: self.make_requests(
-                    self.combined_url, second, request_count,
-                    self.combined_results, self.combined_products, self.combined_lock, "Combined"
+                threads.append(hpa_thread)
+
+            if self.test_combined:
+                combined_thread = threading.Thread(
+                    target=lambda: self.make_requests(
+                        self.combined_url, second, request_count,
+                        self.combined_results, self.combined_products, self.combined_lock, "Combined"
+                    )
                 )
-            )
-            threads = [hpa_thread, combined_thread]
-            if self.predictive_url:
+                threads.append(combined_thread)
+
+            if self.test_predictive:
                 pred_thread = threading.Thread(
                     target=lambda: self.make_predictive_request(self.predictive_url, self.predictive_results)
                 )
                 threads.append(pred_thread)
+
+            # Start all threads
             for thread in threads:
                 thread.start()
+            
+            # Wait for threads to complete
             for thread in threads:
                 thread.join(timeout=0.95)
+                
+            # Print progress every 30 seconds
             if second % 30 == 0 and second > 0:
                 elapsed = second
                 remaining = self.duration - second
                 progress = elapsed / self.duration * 100
-                hpa_count = len(self.hpa_results)
-                combined_count = len(self.combined_results)
-                hpa_successes = sum(1 for r in self.hpa_results if 200 <= r.get("status_code", 0) < 400)
-                combined_successes = sum(1 for r in self.combined_results if 200 <= r.get("status_code", 0) < 400)
-                hpa_success_rate = hpa_successes / hpa_count * 100 if hpa_count > 0 else 0
-                combined_success_rate = combined_successes / combined_count * 100 if combined_count > 0 else 0
+                
+                # Calculate counts and success rates only for active services
+                counts = {}
+                success_rates = {}
+                
+                if self.test_hpa:
+                    hpa_count = len(self.hpa_results)
+                    hpa_successes = sum(1 for r in self.hpa_results if 200 <= r.get("status_code", 0) < 400)
+                    hpa_success_rate = hpa_successes / hpa_count * 100 if hpa_count > 0 else 0
+                    counts["HPA"] = hpa_count
+                    success_rates["HPA"] = hpa_success_rate
+                
+                if self.test_combined:
+                    combined_count = len(self.combined_results)
+                    combined_successes = sum(1 for r in self.combined_results if 200 <= r.get("status_code", 0) < 400)
+                    combined_success_rate = combined_successes / combined_count * 100 if combined_count > 0 else 0
+                    counts["Combined"] = combined_count
+                    success_rates["Combined"] = combined_success_rate
+
                 avg_rate = sum(rate_history[-30:]) / min(30, len(rate_history[-30:]))
+                
                 logger.info(f"Progress: {elapsed}/{self.duration} seconds ({progress:.1f}%). Remaining: {remaining} seconds")
                 logger.info(f"Current request rate: {request_count}/sec, Avg last 30s: {avg_rate:.1f}/sec")
-                logger.info(f"Requests made: HPA={hpa_count}, Combined={combined_count}")
-                logger.info(f"Success rates: HPA={hpa_success_rate:.1f}%, Combined={combined_success_rate:.1f}%")
-                logger.info(f"Products created: HPA={len(self.hpa_products)}, Combined={len(self.combined_products)}")
+                
+                # Log counts and success rates for active services
+                count_msg = ", ".join([f"{svc}={count}" for svc, count in counts.items()])
+                success_msg = ", ".join([f"{svc}={rate:.1f}%" for svc, rate in success_rates.items()])
+                logger.info(f"Requests made: {count_msg}")
+                logger.info(f"Success rates: {success_msg}")
+                
+                # Log products created for active services
+                product_msg = []
+                if self.test_hpa:
+                    product_msg.append(f"HPA={len(self.hpa_products)}")
+                if self.test_combined:
+                    product_msg.append(f"Combined={len(self.combined_products)}")
+                if product_msg:
+                    logger.info(f"Products created: {', '.join(product_msg)}")
+                
                 if second % 300 == 0 and second > 0:
                     self.save_partial_results(f"partial_{second}")
+
         end_time = datetime.now()
         logger.info(f"Test ended at {end_time.isoformat()}")
         logger.info(f"Total duration: {(end_time - self.start_time).total_seconds():.1f} seconds")
-        total_hpa = len(self.hpa_results)
-        total_combined = len(self.combined_results)
-        logger.info(f"Total requests: HPA={total_hpa}, Combined={total_combined}")
-        logger.info(f"Products created: HPA={len(self.hpa_products)}, Combined={len(self.combined_products)}")
+        
+        # Final counts for active services
+        final_counts = {}
+        if self.test_hpa:
+            final_counts["HPA"] = len(self.hpa_results)
+        if self.test_combined:
+            final_counts["Combined"] = len(self.combined_results)
+            
+        count_msg = ", ".join([f"{svc}={count}" for svc, count in final_counts.items()])
+        logger.info(f"Total requests: {count_msg}")
+        
+        product_msg = []
+        if self.test_hpa:
+            product_msg.append(f"HPA={len(self.hpa_products)}")
+        if self.test_combined:
+            product_msg.append(f"Combined={len(self.combined_products)}")
+        if product_msg:
+            logger.info(f"Products created: {', '.join(product_msg)}")
+
         self.save_results()
+        
         try:
             shutil.copy('load_test.log', os.path.join(self.output_dir, 'load_test.log'))
             logger.info(f"Load test log copied to {self.output_dir}/load_test.log")
         except Exception as e:
             logger.error(f"Could not copy log file: {e}")
+
         return {
             "start_time": self.start_time.isoformat(),
             "end_time": end_time.isoformat(),
             "duration_seconds": (end_time - self.start_time).total_seconds(),
-            "hpa_requests": total_hpa,
-            "combined_requests": total_combined,
-            "hpa_success_rate": self.calculate_success_rate(self.hpa_results),
-            "combined_success_rate": self.calculate_success_rate(self.combined_results),
-            "hpa_products_created": len(self.hpa_products),
-            "combined_products_created": len(self.combined_products),
+            "hpa_requests": len(self.hpa_results) if self.test_hpa else 0,
+            "combined_requests": len(self.combined_results) if self.test_combined else 0,
+            "hpa_success_rate": self.calculate_success_rate(self.hpa_results) if self.test_hpa else 0,
+            "combined_success_rate": self.calculate_success_rate(self.combined_results) if self.test_combined else 0,
+            "hpa_products_created": len(self.hpa_products) if self.test_hpa else 0,
+            "combined_products_created": len(self.combined_products) if self.test_combined else 0,
             "output_directory": self.output_dir
         }
 
@@ -503,11 +601,11 @@ class LoadTester:
         try:
             partial_dir = os.path.join(self.output_dir, "partial")
             os.makedirs(partial_dir, exist_ok=True)
-            if self.hpa_results:
+            if self.test_hpa and self.hpa_results:
                 pd.DataFrame(self.hpa_results).to_csv(os.path.join(partial_dir, f"{prefix}_hpa_results.csv"), index=False)
-            if self.combined_results:
+            if self.test_combined and self.combined_results:
                 pd.DataFrame(self.combined_results).to_csv(os.path.join(partial_dir, f"{prefix}_combined_results.csv"), index=False)
-            if self.predictive_results:
+            if self.test_predictive and self.predictive_results:
                 pd.DataFrame(self.predictive_results).to_csv(os.path.join(partial_dir, f"{prefix}_predictive_results.csv"), index=False)
             logger.info(f"Saved partial results with prefix '{prefix}'")
         except Exception as e:
@@ -516,22 +614,26 @@ class LoadTester:
     def save_results(self):
         """Save all results to CSV and JSON files."""
         try:
-            if self.hpa_results:
+            if self.test_hpa and self.hpa_results:
                 hpa_df = pd.DataFrame(self.hpa_results)
                 hpa_df.to_csv(os.path.join(self.output_dir, "hpa_results.csv"), index=False)
                 logger.info(f"Saved HPA results to {self.output_dir}/hpa_results.csv")
-            if self.combined_results:
+            if self.test_combined and self.combined_results:
                 combined_df = pd.DataFrame(self.combined_results)
                 combined_df.to_csv(os.path.join(self.output_dir, "combined_results.csv"), index=False)
                 logger.info(f"Saved Combined results to {self.output_dir}/combined_results.csv")
-            if self.predictive_results:
+            if self.test_predictive and self.predictive_results:
                 predictive_df = pd.DataFrame(self.predictive_results)
                 predictive_df.to_csv(os.path.join(self.output_dir, "predictive_results.csv"), index=False)
                 logger.info(f"Saved Predictive results to {self.output_dir}/predictive_results.csv")
-            with open(os.path.join(self.output_dir, "hpa_products.json"), 'w') as f:
-                json.dump(self.hpa_products, f)
-            with open(os.path.join(self.output_dir, "combined_products.json"), 'w') as f:
-                json.dump(self.combined_products, f)
+            
+            if self.test_hpa:
+                with open(os.path.join(self.output_dir, "hpa_products.json"), 'w') as f:
+                    json.dump(self.hpa_products, f)
+            if self.test_combined:
+                with open(os.path.join(self.output_dir, "combined_products.json"), 'w') as f:
+                    json.dump(self.combined_products, f)
+            
             self.create_summary_statistics()
             self.save_request_rate_data()
         except Exception as e:
@@ -540,7 +642,13 @@ class LoadTester:
     def save_request_rate_data(self):
         """Save the per-second request count for future analysis."""
         try:
-            results_df = pd.DataFrame(self.hpa_results + self.combined_results)
+            all_results = []
+            if self.test_hpa:
+                all_results.extend(self.hpa_results)
+            if self.test_combined:
+                all_results.extend(self.combined_results)
+                
+            results_df = pd.DataFrame(all_results)
             if results_df.empty:
                 logger.warning("No results to create request rate data")
                 return
@@ -557,12 +665,12 @@ class LoadTester:
         """Generate summary statistics from the test results and save them."""
         try:
             all_results = []
-            if self.hpa_results:
+            if self.test_hpa and self.hpa_results:
                 for result in self.hpa_results:
                     r_copy = result.copy()
                     r_copy["service"] = "HPA"
                     all_results.append(r_copy)
-            if self.combined_results:
+            if self.test_combined and self.combined_results:
                 for result in self.combined_results:
                     r_copy = result.copy()
                     r_copy["service"] = "Combined"
@@ -678,24 +786,36 @@ class LoadTester:
 def parse_arguments():
     """Parse command line arguments for the load test."""
     parser = argparse.ArgumentParser(description='Run functional load test for product app')
+    
+    # Service selection arguments
+    parser.add_argument('--target', type=str, choices=['hpa', 'combined', 'both'], default='both',
+                      help='Which service(s) to test: hpa, combined, or both (default: both)')
     parser.add_argument('--hpa-url', type=str, default=DEFAULT_HPA_URL, help='URL for HPA service')
     parser.add_argument('--combined-url', type=str, default=DEFAULT_COMBINED_URL, help='URL for Combined service')
     parser.add_argument('--predictive-url', type=str, default=DEFAULT_PREDICTIVE_URL, help='URL for Predictive Scaler service')
+    parser.add_argument('--test-predictive', action='store_true', default=True, help='Include predictive scaler in testing')
+    
+    # Test configuration arguments
     parser.add_argument('--duration', type=int, default=1800, help='Test duration in seconds (default: 1800)')
     parser.add_argument('--output-dir', type=str, default='./load_test_results', help='Output directory for results')
-    parser.add_argument('--normal-min', type=int, default=NORMAL_LOAD_RANGE[0], help=f'Minimum normal requests (default: {NORMAL_LOAD_RANGE[0]})')
+    
+    # Load pattern arguments
+    parser.add_argument('--normal-min', type=int, default=NORMAL_LOAD_RANGE, help=f'Minimum normal requests (default: {NORMAL_LOAD_RANGE})')
     parser.add_argument('--normal-max', type=int, default=NORMAL_LOAD_RANGE[1], help=f'Maximum normal requests (default: {NORMAL_LOAD_RANGE[1]})')
-    parser.add_argument('--peak-min', type=int, default=PEAK_LOAD_RANGE[0], help=f'Minimum peak requests (default: {PEAK_LOAD_RANGE[0]})')
+    parser.add_argument('--peak-min', type=int, default=PEAK_LOAD_RANGE, help=f'Minimum peak requests (default: {PEAK_LOAD_RANGE})')
     parser.add_argument('--peak-max', type=int, default=PEAK_LOAD_RANGE[1], help=f'Maximum peak requests (default: {PEAK_LOAD_RANGE[1]})')
     parser.add_argument('--disturbance-interval', type=int, default=DISTURBANCE_INTERVAL, help=f'Seconds between disturbances (default: {DISTURBANCE_INTERVAL})')
     parser.add_argument('--disturbance-duration', type=int, default=DISTURBANCE_DURATION, help=f'Duration of each disturbance (default: {DISTURBANCE_DURATION} seconds)')
     parser.add_argument('--volatility', type=float, default=VOLATILITY_FACTOR, help=f'Volatility factor (default: {VOLATILITY_FACTOR})')
     parser.add_argument('--timeout', type=int, default=REQUEST_TIMEOUT, help=f'Request timeout in seconds (default: {REQUEST_TIMEOUT})')
+    
     return parser.parse_args()
 
 def main():
     """Main function – parse arguments and start the load test."""
     args = parse_arguments()
+    
+    # Update global settings based on command-line args
     global NORMAL_LOAD_RANGE, PEAK_LOAD_RANGE, DISTURBANCE_INTERVAL, DISTURBANCE_DURATION, VOLATILITY_FACTOR, REQUEST_TIMEOUT
     NORMAL_LOAD_RANGE = (args.normal_min, args.normal_max)
     PEAK_LOAD_RANGE = (args.peak_min, args.peak_max)
@@ -704,11 +824,20 @@ def main():
     VOLATILITY_FACTOR = args.volatility
     REQUEST_TIMEOUT = args.timeout
 
-    logger.info("Starting Moderate Load Test")
-    logger.info("=========================")
-    logger.info(f"HPA URL: {args.hpa_url}")
-    logger.info(f"Combined URL: {args.combined_url}")
-    logger.info(f"Predictive URL: {args.predictive_url}")
+    # Determine which services to test based on target argument
+    test_hpa = args.target in ['hpa', 'both']
+    test_combined = args.target in ['combined', 'both']
+    test_predictive = args.test_predictive
+
+    logger.info("Starting Selective Load Test")
+    logger.info("===========================")
+    logger.info(f"Target services: {args.target}")
+    if test_hpa:
+        logger.info(f"HPA URL: {args.hpa_url}")
+    if test_combined:
+        logger.info(f"Combined URL: {args.combined_url}")
+    if test_predictive:
+        logger.info(f"Predictive URL: {args.predictive_url}")
     logger.info(f"Duration: {args.duration} seconds")
     logger.info(f"Output directory: {args.output_dir}")
     logger.info(f"Normal load range: {NORMAL_LOAD_RANGE} req/sec")
@@ -718,14 +847,17 @@ def main():
     logger.info(f"Volatility factor: {VOLATILITY_FACTOR}")
     logger.info(f"Request timeout: {REQUEST_TIMEOUT} seconds")
     logger.info(f"Endpoint weights: {ENDPOINT_WEIGHTS}")
-    logger.info("=========================")
+    logger.info("===========================")
 
     tester = LoadTester(
         hpa_url=args.hpa_url,
         combined_url=args.combined_url,
         predictive_url=args.predictive_url,
         duration=args.duration,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        test_hpa=test_hpa,
+        test_combined=test_combined,
+        test_predictive=test_predictive
     )
 
     try:
@@ -735,16 +867,18 @@ def main():
         logger.info(f"Start time: {summary['start_time']}")
         logger.info(f"End time: {summary['end_time']}")
         logger.info(f"Duration: {summary['duration_seconds']:.2f} seconds")
-        logger.info(f"Total HPA requests: {summary['hpa_requests']}")
-        logger.info(f"Total Combined requests: {summary['combined_requests']}")
-        logger.info(f"HPA success rate: {summary['hpa_success_rate'] * 100:.2f}%")
-        logger.info(f"Combined success rate: {summary['combined_success_rate'] * 100:.2f}%")
-        logger.info(f"HPA products created: {summary['hpa_products_created']}")
-        logger.info(f"Combined products created: {summary['combined_products_created']}")
+        if test_hpa:
+            logger.info(f"Total HPA requests: {summary['hpa_requests']}")
+            logger.info(f"HPA success rate: {summary['hpa_success_rate'] * 100:.2f}%")
+            logger.info(f"HPA products created: {summary['hpa_products_created']}")
+        if test_combined:
+            logger.info(f"Total Combined requests: {summary['combined_requests']}")
+            logger.info(f"Combined success rate: {summary['combined_success_rate'] * 100:.2f}%")
+            logger.info(f"Combined products created: {summary['combined_products_created']}")
         logger.info(f"Results saved to: {summary['output_directory']}")
         logger.info("==============================")
         logger.info("\nTo retrieve the results, run:")
-        logger.info(f"kubectl cp load-test:<pod_name>:{summary['output_directory']} ./")
+        logger.info(f"kubectl cp load-test:{summary['output_directory']} ./")
     except KeyboardInterrupt:
         logger.info("Test interrupted by user. Saving partial results...")
         tester.stop_event.set()
