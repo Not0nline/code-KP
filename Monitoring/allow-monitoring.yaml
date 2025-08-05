@@ -4,11 +4,13 @@ metadata:
   name: allow-monitoring
   namespace: default
 spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
   ingress:
   - from:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: monitoring
-  podSelector: {}
-  policyTypes:
-  - Ingress
+  - from:
+    - podSelector: {}  # This allows all pods in default namespace to talk to each other
