@@ -17,7 +17,7 @@ spec:
         image: 4drial/product-app:latest
         command: ["/bin/sh", "-c"]
         args:
-          - "gunicorn --workers ${GUNICORN_WORKERS:-4} --bind 0.0.0.0:5000 --timeout 10 app:app"
+          - "gunicorn --workers 1 --bind 0.0.0.0:5000 --timeout 10 app:app"
         ports:
         - name: http-metrics
           containerPort: 5000
@@ -25,17 +25,17 @@ spec:
           httpGet:
             path: /health
             port: 5000
-          initialDelaySeconds: 60
+          initialDelaySeconds: 30
           periodSeconds: 10
-          timeoutSeconds: 10
+          timeoutSeconds: 5
           failureThreshold: 3
         resources:
           requests:
-            cpu: "250m"
-            memory: "256Mi"
+            cpu: "50m"
+            memory: "64Mi"
           limits:
-            cpu: "1"
-            memory: "512Mi"
+            cpu: "100m"
+            memory: "128Mi"
         env:
         - name: APP_TYPE
           value: "product-app-combined"
