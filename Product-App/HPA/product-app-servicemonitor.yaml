@@ -12,9 +12,9 @@ spec:
       - default
   selector:
     matchLabels:
-      app: product-app-hpa
+      app: product-app-hpa 
   endpoints:
   - port: http
     path: /metrics
-    interval: 30s        # Changed: interval must be >= timeout
-    scrapeTimeout: 10s   # Changed: timeout must be < interval
+    interval: 30s
+    scrapeTimeout: 10s
