@@ -1,4 +1,3 @@
-# autoscaler.py
 from flask import Flask, request, jsonify
 import numpy as np
 import pandas as pd
@@ -61,7 +60,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global variables
+# Global variables - Keep original hyperparameters
 DATA_FILE = "traffic_data.csv"
 MODEL_FILE = "gru_model.h5"
 CONFIG_FILE = "config.json"
@@ -70,7 +69,7 @@ PREDICTION_WINDOW = 24  # Based on your hyperparameters
 SCALING_THRESHOLD = 0.7  # CPU threshold for scaling decision
 SCALING_COOLDOWN = 300  # 5 minutes cooldown between scaling actions
 
-# Default configuration with your hyperparameters
+# Default configuration with your original hyperparameters
 config = {
     "use_gru": False,
     "collection_interval": 60,  # seconds
@@ -80,6 +79,15 @@ config = {
         'http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090'),
     "target_deployment": os.getenv('TARGET_DEPLOYMENT', 'product-app-combined'),
     "target_namespace": os.getenv('TARGET_NAMESPACE', 'default'),
+    "cost_optimization": {
+        "enabled": True,
+        "target_cpu_utilization": 85,  # Higher target for cost efficiency
+        "scale_up_threshold": 90,  # Only scale up at very high CPU
+        "scale_down_threshold": 30,  # More aggressive scale down
+        "min_replicas": 1,
+        "max_replicas": 10, 
+        "aggressive_scaling": True
+    },
     "models": {
         "holt_winters": {
             "slen": 12,  # seasonal length
@@ -305,7 +313,7 @@ def preprocess_data(data, sequence_length=100):
     return np.array(X), np.array(y)
 
 def build_gru_model():
-    """Build and train GRU model with your hyperparameters."""
+    """Build and train GRU model with your original hyperparameters."""
     global gru_model, last_training_time
     
     start_time = time.time()
@@ -334,8 +342,8 @@ def build_gru_model():
     
     model.fit(
         X, y,
-        epochs=min(int(gru_config["epochs"]), 50),  # Limit epochs for faster training
-        batch_size=int(gru_config["batch_size"]),
+        epochs=int(gru_config["epochs"]),  # Use original epochs value
+        batch_size=int(gru_config["batch_size"]),  # Use original batch_size
         validation_split=0.2,
         verbose=0
     )
@@ -356,7 +364,7 @@ def build_gru_model():
     return True
 
 def predict_with_holtwinters(steps=None):
-    """Predict using Holt-Winters with improved error handling."""
+    """Predict using Holt-Winters with original hyperparameters."""
     start_time = time.time()
     hw_config = config["models"]["holt_winters"]
     
@@ -374,17 +382,17 @@ def predict_with_holtwinters(steps=None):
         if len(set(replicas)) == 1:  # All values are the same
             return [replicas[-1]] * steps
         
-        # Fit Holt-Winters
+        # Fit Holt-Winters with original hyperparameters
         model = ExponentialSmoothing(
             replicas,
-            seasonal_periods=12,
+            seasonal_periods=int(hw_config["slen"]),  # Use original slen
             trend='add',
             seasonal='add',
             damped_trend=True
         ).fit(
-            smoothing_level=float(hw_config["alpha"]),
-            smoothing_trend=float(hw_config["beta"]),
-            smoothing_seasonal=float(hw_config["gamma"])
+            smoothing_level=float(hw_config["alpha"]),  # Use original alpha
+            smoothing_trend=float(hw_config["beta"]),   # Use original beta
+            smoothing_seasonal=float(hw_config["gamma"])  # Use original gamma
         )
         
         forecast = model.forecast(steps).tolist()
@@ -403,7 +411,7 @@ def predict_with_holtwinters(steps=None):
         return None
 
 def predict_with_gru(steps=None):
-    """Predict using GRU model with your hyperparameters."""
+    """Predict using GRU model with your original hyperparameters."""
     global gru_model
     start_time = time.time()
     
@@ -416,7 +424,7 @@ def predict_with_gru(steps=None):
         logger.warning("GRU model not available")
         return None
     
-    look_back = int(gru_config["look_back"])
+    look_back = int(gru_config["look_back"])  # Use original look_back
     
     if len(traffic_data) < look_back:
         logger.warning("Not enough data for GRU prediction")
@@ -459,28 +467,56 @@ def predict_with_gru(steps=None):
         return None
 
 def make_scaling_decision(predictions):
-    """Determine if scaling is needed based on predictions."""
+    """Determine if scaling is needed based on predictions with cost optimization."""
     global last_scaling_time
     
     if predictions is None or len(predictions) == 0:
-        return "maintain", 0
+        return "maintain", 1
     
     current_time = time.time()
     if current_time - last_scaling_time < SCALING_COOLDOWN:
-        return "cooldown", 0
+        return "cooldown", traffic_data[-1]['replicas'] if traffic_data else 1
+    
+    # Get current state
+    current_replicas = traffic_data[-1]['replicas'] if traffic_data else 1
+    current_cpu = traffic_data[-1]['cpu_utilization'] if traffic_data else 10
     
     # Use the predictions directly as they're already replica counts
     max_replicas = max(predictions)
-    current_replicas = traffic_data[-1]['replicas'] if traffic_data else 1
     
-    if max_replicas > current_replicas:
-        last_scaling_time = current_time
-        return "scale_up", int(max_replicas)
-    elif max_replicas < current_replicas:
-        last_scaling_time = current_time
-        return "scale_down", int(max_replicas)
+    # Cost optimization logic - only scale if really necessary
+    cost_config = config.get('cost_optimization', {})
+    if cost_config.get('enabled', True):
+        scale_up_threshold = cost_config.get('scale_up_threshold', 90)
+        scale_down_threshold = cost_config.get('scale_down_threshold', 30)
+        min_replicas = cost_config.get('min_replicas', 1)
+        max_replicas_limit = cost_config.get('max_replicas', 10)
+        
+        # Only scale up if CPU is very high
+        if current_cpu > scale_up_threshold and max_replicas > current_replicas:
+            recommended_replicas = min(max_replicas_limit, max_replicas)
+            last_scaling_time = current_time
+            return "scale_up", int(recommended_replicas)
+        
+        # More aggressive scale down for cost savings
+        elif current_cpu < scale_down_threshold and max_replicas < current_replicas and current_replicas > min_replicas:
+            recommended_replicas = max(min_replicas, max_replicas)
+            last_scaling_time = current_time
+            return "scale_down", int(recommended_replicas)
+        
+        else:
+            return "maintain", int(current_replicas)
+    
     else:
-        return "maintain", int(current_replicas)
+        # Original scaling logic
+        if max_replicas > current_replicas:
+            last_scaling_time = current_time
+            return "scale_up", int(max_replicas)
+        elif max_replicas < current_replicas:
+            last_scaling_time = current_time
+            return "scale_down", int(max_replicas)
+        else:
+            return "maintain", int(current_replicas)
 
 def compare_predictions_with_heap(gru_predictions, hw_predictions):
     """Compare predictions from GRU and Holt-Winters models using a min heap."""
@@ -552,7 +588,8 @@ def status():
         'using_gru': config['use_gru'],
         'uptime_minutes': minutes_elapsed,
         'time_until_gru': max(0, config['training_threshold_minutes'] - minutes_elapsed) if not is_model_trained else 0,
-        'last_training': last_training_time.isoformat() if last_training_time else None
+        'last_training': last_training_time.isoformat() if last_training_time else None,
+        'cost_optimization': config.get('cost_optimization', {})
     })
 
 @app.route('/data', methods=['GET'])
@@ -631,16 +668,31 @@ def predict_combined():
             predictions = predict_with_holtwinters()
         
         if not predictions:
-            # Simple reactive scaling as last resort
+            # Simple reactive scaling as last resort with cost optimization
             method = 'reactive'
-            if current_metrics['cpu_utilization'] > 70:
-                predictions = [min(10, current_replicas + 2)]
-            elif current_metrics['cpu_utilization'] > 50:
-                predictions = [min(10, current_replicas + 1)]
-            elif current_metrics['cpu_utilization'] < 30 and current_replicas > 1:
-                predictions = [max(1, current_replicas - 1)]
+            cost_config = config.get('cost_optimization', {})
+            if cost_config.get('enabled', True):
+                scale_up_threshold = cost_config.get('scale_up_threshold', 90)
+                scale_down_threshold = cost_config.get('scale_down_threshold', 30)
+                min_replicas = cost_config.get('min_replicas', 1)
+                max_replicas_limit = cost_config.get('max_replicas', 10)
+                
+                if current_metrics['cpu_utilization'] > scale_up_threshold:
+                    predictions = [min(max_replicas_limit, current_replicas + 1)]
+                elif current_metrics['cpu_utilization'] < scale_down_threshold and current_replicas > min_replicas:
+                    predictions = [max(min_replicas, current_replicas - 1)]
+                else:
+                    predictions = [current_replicas]
             else:
-                predictions = [current_replicas]
+                # Original reactive logic
+                if current_metrics['cpu_utilization'] > 70:
+                    predictions = [min(10, current_replicas + 2)]
+                elif current_metrics['cpu_utilization'] > 50:
+                    predictions = [min(10, current_replicas + 1)]
+                elif current_metrics['cpu_utilization'] < 30 and current_replicas > 1:
+                    predictions = [max(1, current_replicas - 1)]
+                else:
+                    predictions = [current_replicas]
         
         recommended_replicas_value = predictions[0] if predictions else current_replicas
         
@@ -664,7 +716,8 @@ def predict_combined():
             'current_replicas': int(current_replicas),
             'scaling_decision': scaling_decision,
             'time_until_gru': max(0, config['training_threshold_minutes'] - minutes_elapsed) if not is_model_trained else 0,
-            'is_model_trained': is_model_trained
+            'is_model_trained': is_model_trained,
+            'cost_optimization': config.get('cost_optimization', {})
         })
         
     except Exception as e:
