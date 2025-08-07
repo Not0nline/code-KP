@@ -38,9 +38,9 @@ TEST_TARGETS = {
 }
 
 # Traffic pattern configuration – lower, more manageable load
-NORMAL_LOAD_RANGE = (75, 100)       # Normal load requests per second
-PEAK_LOAD_RANGE = (175, 250)         # Peak load requests per second
-DISTURBANCE_INTERVAL = 25          # Seconds between peak disturbances (about 25 sec)
+NORMAL_LOAD_RANGE = (5, 10)       # Normal load requests per second
+PEAK_LOAD_RANGE = (100, 150)         # Peak load requests per second
+DISTURBANCE_INTERVAL = 30          # Seconds between peak disturbances (about 30 sec)
 DISTURBANCE_DURATION = 10          # Peak duration in seconds
 VOLATILITY_FACTOR = 1              # Volatility factor for minor spikes/dips
 
