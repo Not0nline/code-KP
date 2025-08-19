@@ -1,0 +1,2 @@
+
+kubectl patch svc predictive-scaler -p '{"metadata":{"labels":{"app":"predictive-scaler"}},"spec":{"ports":[{"name":"http","port":5000,"targetPort":5000,"protocol":"TCP"}]}}'
