@@ -24,7 +24,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 38,
+  "id": 29,
   "links": [],
   "panels": [
     {
@@ -88,7 +88,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": 0
               },
               {
                 "color": "red",
@@ -119,7 +120,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.0",
+      "pluginVersion": "12.1.0",
       "targets": [
         {
           "datasource": {
@@ -196,7 +197,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": 0
               },
               {
                 "color": "red",
@@ -228,7 +230,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.0",
+      "pluginVersion": "12.1.0",
       "targets": [
         {
           "datasource": {
@@ -236,7 +238,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "avg(rate(container_cpu_usage_seconds_total{namespace=\"default\", pod=~\"product-app-hpa.*\", container=\"product-app\"}[1m])) / avg(kube_pod_container_resource_limits{namespace=\"default\", pod=~\"product-app-hpa.*\", resource=\"cpu\"}) * 100",
+          "expr": "avg(rate(container_cpu_usage_seconds_total{namespace=\"default\", pod=~\"product-app-hpa.*\", container=\"product-app\"}[1m])) / avg(kube_pod_container_resource_limits{namespace=\"default\", pod=~\"product-app-hpa.*\", resource=\"cpu\"}) * 200 ",
           "legendFormat": "HPA CPU Usage %",
           "range": true,
           "refId": "A"
@@ -247,7 +249,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "avg(rate(container_cpu_usage_seconds_total{namespace=\"default\", pod=~\"product-app-combined.*\", container=\"product-app\"}[1m])) / avg(kube_pod_container_resource_limits{namespace=\"default\", pod=~\"product-app-combined.*\", resource=\"cpu\"}) * 100",
+          "expr": "avg(rate(container_cpu_usage_seconds_total{namespace=\"default\", pod=~\"product-app-combined.*\", container=\"product-app\"}[1m])) / avg(kube_pod_container_resource_limits{namespace=\"default\", pod=~\"product-app-combined.*\", resource=\"cpu\"}) * 200",
           "legendFormat": "Combined CPU Usage %",
           "range": true,
           "refId": "B"
@@ -317,7 +319,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": 0
               },
               {
                 "color": "red",
@@ -349,7 +352,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.0",
+      "pluginVersion": "12.1.0",
       "targets": [
         {
           "datasource": {
@@ -425,7 +428,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": 0
               },
               {
                 "color": "red",
@@ -457,7 +461,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.0",
+      "pluginVersion": "12.1.0",
       "targets": [
         {
           "datasource": {
@@ -493,14 +497,48 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": 0
               },
               {
                 "color": "yellow",
@@ -513,32 +551,60 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "GRU Model MSE"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Holt-Winters Model MSE"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 24,
         "x": 0,
         "y": 18
       },
       "id": 10,
       "options": {
-        "minVizHeight": 75,
-        "minVizWidth": 75,
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
         },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true,
-        "sizing": "auto",
-        "text": {}
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
       },
-      "pluginVersion": "11.6.0",
+      "pluginVersion": "12.1.0",
       "targets": [
         {
           "datasource": {
@@ -546,83 +612,25 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "avg(rate(app_http_requests_total{app=\"product-app-combined\"}[5m])) / avg(rate(app_http_requests_total{app=\"product-app-combined\"}[5m]))",
+          "expr": "current_model_mse{model=\"gru\"}",
           "legendFormat": "GRU Model MSE",
           "range": true,
           "refId": "A"
-        }
-      ],
-      "title": "GRU Prediction MSE (Mean Squared Error)",
-      "type": "gauge"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "yellow",
-                "value": 0.1
-              },
-              {
-                "color": "red",
-                "value": 0.3
-              }
-            ]
-          }
         },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 18
-      },
-      "id": 11,
-      "options": {
-        "minVizHeight": 75,
-        "minVizWidth": 75,
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true,
-        "sizing": "auto"
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "avg(rate(app_http_requests_total{app=\"product-app-hpa\"}[5m])) / avg(rate(app_http_requests_total{app=\"product-app-hpa\"}[5m]))",
-          "legendFormat": "Holt-Winter Model MSE",
+          "expr": "current_model_mse{model=\"holt_winters\"}",
+          "legendFormat": "Holt-Winters Model MSE",
           "range": true,
-          "refId": "A"
+          "refId": "B"
         }
       ],
-      "title": "Holt-Winter Prediction MSE (Mean Squared Error)",
-      "type": "gauge"
+      "title": "Model Prediction MSE (Mean Squared Error)",
+      "type": "timeseries"
     },
     {
       "collapsed": false,
@@ -685,7 +693,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": 0
               },
               {
                 "color": "red",
@@ -694,11 +703,42 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "HPA Pod Count"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Combined Pod Count"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "purple",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 24,
         "x": 0,
         "y": 27
       },
@@ -716,7 +756,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.0",
+      "pluginVersion": "12.1.0",
       "targets": [
         {
           "datasource": {
@@ -728,92 +768,7 @@
           "legendFormat": "HPA Pod Count",
           "range": true,
           "refId": "A"
-        }
-      ],
-      "title": "HPA Pods Count",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
         },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 27
-      },
-      "id": 4,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
@@ -823,10 +778,10 @@
           "expr": "count(kube_pod_info{namespace=\"default\", pod=~\"product-app-combined.*\"})",
           "legendFormat": "Combined Pod Count",
           "range": true,
-          "refId": "A"
+          "refId": "B"
         }
       ],
-      "title": "Combined Approach Pods Count",
+      "title": "Pod Count Comparison",
       "type": "timeseries"
     },
     {
@@ -890,7 +845,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": 0
               },
               {
                 "color": "red",
@@ -953,7 +909,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.0",
+      "pluginVersion": "12.1.0",
       "targets": [
         {
           "datasource": {
@@ -1029,7 +985,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": 0
               },
               {
                 "color": "red",
@@ -1092,7 +1049,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.0",
+      "pluginVersion": "12.1.0",
       "targets": [
         {
           "datasource": {
@@ -1168,7 +1125,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": 0
               },
               {
                 "color": "red",
@@ -1230,7 +1188,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.0",
+      "pluginVersion": "12.1.0",
       "targets": [
         {
           "datasource": {
@@ -1306,7 +1264,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": 0
               },
               {
                 "color": "red",
@@ -1368,7 +1327,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.0",
+      "pluginVersion": "12.1.0",
       "targets": [
         {
           "datasource": {
@@ -1457,7 +1416,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green"
+                "color": "green",
+                "value": 0
               },
               {
                 "color": "red",
@@ -1489,7 +1449,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "11.6.0",
+      "pluginVersion": "12.1.0",
       "targets": [
         {
           "datasource": {
@@ -1522,5 +1482,5 @@
   "timezone": "",
   "title": "Predictive Scaling Dashboard - Improved",
   "uid": "predictive-scaling-improved",
-  "version": 9
+  "version": 2
 }
