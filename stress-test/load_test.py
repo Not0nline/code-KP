@@ -148,82 +148,106 @@ class StressTestRunner:
         # Realistic traffic patterns for better autoscaler training
         self.traffic_patterns = [
             TrafficPattern(
-                name="gradual_warmup",
-                duration_minutes=8,
-                base_rps=0.1,
-                peak_rps=2.0,
-                pattern_type="linear",
-                description="Gradual traffic increase to allow model training"
-            ),
-            TrafficPattern(
-                name="steady_low",
-                duration_minutes=5,
-                base_rps=1.0,
-                peak_rps=1.5,
-                pattern_type="sine",
-                description="Steady low traffic with minor variations"
-            ),
-            TrafficPattern(
-                name="moderate_load",
-                duration_minutes=6,
-                base_rps=2.0,
-                peak_rps=4.0,
-                pattern_type="linear",
-                description="Moderate load increase"
-            ),
-            TrafficPattern(
-                name="high_load_sustained",
-                duration_minutes=4,
-                base_rps=8.0,
-                peak_rps=8.5,
-                pattern_type="sine",
-                description="High sustained load for scale-up testing"
-            ),
-            TrafficPattern(
-                name="gradual_cooldown",
-                duration_minutes=6,
-                base_rps=8.0,
-                peak_rps=1.0,
-                pattern_type="exponential",
-                description="Gradual cooldown for scale-down testing"
-            ),
-            TrafficPattern(
-                name="idle_period",
-                duration_minutes=4,
-                base_rps=0.05,
-                peak_rps=0.1,
-                pattern_type="step",
-                description="Very low traffic to test idle scaling"
-            ),
-            TrafficPattern(
-                name="traffic_spike",
+                name="quick_warmup",
                 duration_minutes=3,
-                base_rps=0.5,
-                peak_rps=12.0,
-                pattern_type="spike",
-                description="Sharp traffic spike"
-            ),
-            TrafficPattern(
-                name="recovery",
-                duration_minutes=5,
-                base_rps=3.0,
-                peak_rps=2.0,
+                base_rps=0.2,
+                peak_rps=5.0,
                 pattern_type="linear",
-                description="Traffic recovery to normal levels"
+                description="Quick warmup to initialize autoscaler"
             ),
             TrafficPattern(
-                name="business_hours_sim",
-                duration_minutes=8,
+                name="volatile_low",
+                duration_minutes=4,
                 base_rps=1.0,
-                peak_rps=6.0,
+                peak_rps=8.0,
                 pattern_type="sine",
-                description="Simulate business hours traffic pattern"
+                description="Volatile low traffic with significant variations"
             ),
             TrafficPattern(
-                name="final_cooldown",
-                duration_minutes=6,
-                base_rps=4.0,
-                peak_rps=0.2,
+                name="moderate_burst",
+                duration_minutes=2,
+                base_rps=3.0,
+                peak_rps=15.0,
+                pattern_type="linear",
+                description="Moderate to high load burst"
+            ),
+            TrafficPattern(
+                name="heavy_sustained",
+                duration_minutes=2,
+                base_rps=22.0,
+                peak_rps=25.0,
+                pattern_type="sine",
+                description="Heavy sustained load for maximum scale-up testing"
+            ),
+            TrafficPattern(
+                name="light_recovery",
+                duration_minutes=4,
+                base_rps=20.0,
+                peak_rps=2.0,
+                pattern_type="exponential",
+                description="Recovery period with exponential cooldown"
+            ),
+            TrafficPattern(
+                name="traffic_spike_extreme",
+                duration_minutes=2,
+                base_rps=1.0,
+                peak_rps=30.0,
+                pattern_type="spike",
+                description="Extreme traffic spike to test rapid scaling"
+            ),
+            TrafficPattern(
+                name="idle_low",
+                duration_minutes=4,
+                base_rps=0.1,
+                peak_rps=0.5,
+                pattern_type="step",
+                description="Very low idle traffic for scale-down testing"
+            ),
+            TrafficPattern(
+                name="step_shock",
+                duration_minutes=2,
+                base_rps=1.0,
+                peak_rps=20.0,
+                pattern_type="step",
+                description="Step function shock load"
+            ),
+            TrafficPattern(
+                name="volatile_business_hours",
+                duration_minutes=4,
+                base_rps=2.0,
+                peak_rps=18.0,
+                pattern_type="sine",
+                description="Volatile business hours simulation with high peaks"
+            ),
+            TrafficPattern(
+                name="burst_pattern",
+                duration_minutes=2,
+                base_rps=5.0,
+                peak_rps=28.0,
+                pattern_type="spike",
+                description="Burst pattern with very high peak load"
+            ),
+            TrafficPattern(
+                name="gradual_decline",
+                duration_minutes=4,
+                base_rps=15.0,
+                peak_rps=1.0,
+                pattern_type="linear",
+                description="Gradual decline from high to low traffic"
+            ),
+            TrafficPattern(
+                name="final_spike_test",
+                duration_minutes=2,
+                base_rps=2.0,
+                peak_rps=25.0,
+                pattern_type="spike",
+                description="Final aggressive spike test"
+            ),
+            TrafficPattern(
+                name="cooldown",
+                duration_minutes=3,
+                base_rps=8.0,
+                peak_rps=0.1,
                 pattern_type="exponential",
                 description="Final cooldown to minimal traffic"
             )
