@@ -57,8 +57,8 @@ predictive_scaler_recommended_replicas = Gauge('predictive_scaler_recommended_re
                                              'Recommended number of replicas', 
                                              ['method'])
 
-# New metrics for MSE tracking
-current_mse = Gauge('current_model_mse', 'Current MSE for each model', 
+# Enhanced MSE metrics with -1 for invalid states
+current_mse = Gauge('current_model_mse', 'Current MSE for each model (-1 = invalid/insufficient data)', 
                    labelnames=['model'])
 model_selection = Counter('model_selection_total', 'Number of times each model was selected',
                          labelnames=['model', 'reason'])
@@ -105,8 +105,11 @@ config = {
     "mse_config": {
         "enabled": True,
         "min_samples_for_mse": 10,  # Minimum samples needed to calculate MSE
-        "mse_window_size": 20,  # Number of recent predictions to use for MSE
-        "mse_threshold_difference": 0.5  # Min difference between MSEs to switch models
+        "mse_window_size": 30,  # Increased window for better MSE calculation
+        "mse_threshold_difference": 0.5,  # Min difference between MSEs to switch models
+        "prediction_match_tolerance_minutes": 5,  # How long to wait for actual values
+        "max_prediction_age_hours": 2,  # Remove predictions older than this
+        "debug_mse_matching": True  # Enable detailed MSE matching logs
     },
     "models": {
         "holt_winters": {
@@ -150,7 +153,7 @@ prometheus_client = None
 low_traffic_start_time = None
 consecutive_low_cpu_count = 0
 
-# MSE tracking variables
+# Enhanced MSE tracking variables
 predictions_history = {
     'gru': [],
     'holt_winters': []
@@ -229,32 +232,62 @@ def save_predictions_history():
     except Exception as e:
         logger.error(f"Error saving predictions history: {e}")
 
+def cleanup_old_predictions():
+    """Remove predictions that are too old to be matched"""
+    current_time = datetime.now()
+    max_age_hours = config['mse_config']['max_prediction_age_hours']
+    cutoff_time = current_time - timedelta(hours=max_age_hours)
+    
+    for model_name in predictions_history:
+        original_count = len(predictions_history[model_name])
+        predictions_history[model_name] = [
+            p for p in predictions_history[model_name]
+            if datetime.strptime(p['timestamp'], "%Y-%m-%d %H:%M:%S") > cutoff_time
+        ]
+        removed_count = original_count - len(predictions_history[model_name])
+        if removed_count > 0:
+            logger.debug(f"Cleaned up {removed_count} old predictions for {model_name}")
+
 def add_prediction_to_history(model_name, predicted_replicas, timestamp):
-    """Add a prediction to history for later MSE calculation"""
+    """Enhanced prediction tracking with better metadata"""
     global predictions_history
+    
+    # Get current state for context
+    current_cpu = 0
+    current_traffic = 0
+    if traffic_data:
+        current_cpu = traffic_data[-1]['cpu_utilization']
+        current_traffic = traffic_data[-1]['traffic']
     
     prediction_entry = {
         'timestamp': timestamp,
         'predicted_replicas': predicted_replicas,
         'actual_replicas': None,  # Will be filled when we get actual data
         'predicted_cpu': None,
-        'actual_cpu': None
+        'actual_cpu': None,
+        'context_cpu': current_cpu,  # CPU at time of prediction
+        'context_traffic': current_traffic,  # Traffic at time of prediction
+        'matched': False,
+        'match_timestamp': None
     }
     
     predictions_history[model_name].append(prediction_entry)
     
     # Keep only recent predictions
     mse_window = config['mse_config']['mse_window_size']
-    if len(predictions_history[model_name]) > mse_window * 2:
-        predictions_history[model_name] = predictions_history[model_name][-mse_window:]
+    if len(predictions_history[model_name]) > mse_window * 3:  # Keep extra for matching
+        predictions_history[model_name] = predictions_history[model_name][-mse_window * 2:]
+    
+    # Clean up old predictions periodically
+    cleanup_old_predictions()
     
     # Save periodically
     if len(predictions_history[model_name]) % 5 == 0:
         save_predictions_history()
 
 def update_predictions_with_actual_values():
-    """Update prediction history with actual values for MSE calculation"""
-    global predictions_history, gru_mse, holt_winters_mse
+    """Enhanced prediction-to-actual matching with flexible time windows"""
+    global predictions_history
     
     if not traffic_data:
         return
@@ -263,82 +296,146 @@ def update_predictions_with_actual_values():
     current_replicas = traffic_data[-1]['replicas']
     current_cpu = traffic_data[-1]['cpu_utilization']
     
+    tolerance_minutes = config['mse_config']['prediction_match_tolerance_minutes']
+    debug_mode = config['mse_config']['debug_mse_matching']
+    
+    match_count = 0
+    
     # Update both model histories
     for model_name in ['gru', 'holt_winters']:
         for prediction in predictions_history[model_name]:
-            if prediction['actual_replicas'] is None:
-                pred_time = datetime.strptime(prediction['timestamp'], "%Y-%m-%d %H:%M:%S")
-                # If prediction is from 1-2 minutes ago, update with current actual values
-                time_diff = (current_time - pred_time).total_seconds()
-                if 60 <= time_diff <= 300:  # Between 1-5 minutes
-                    prediction['actual_replicas'] = current_replicas
-                    prediction['actual_cpu'] = current_cpu
+            if not prediction['matched']:  # Only process unmatched predictions
+                try:
+                    pred_time = datetime.strptime(prediction['timestamp'], "%Y-%m-%d %H:%M:%S")
+                    time_diff_seconds = (current_time - pred_time).total_seconds()
+                    time_diff_minutes = time_diff_seconds / 60
+                    
+                    # Use flexible matching window (1-8 minutes)
+                    if 60 <= time_diff_seconds <= (tolerance_minutes * 60):
+                        prediction['actual_replicas'] = current_replicas
+                        prediction['actual_cpu'] = current_cpu
+                        prediction['matched'] = True
+                        prediction['match_timestamp'] = current_time.strftime("%Y-%m-%d %H:%M:%S")
+                        match_count += 1
+                        
+                        if debug_mode:
+                            logger.debug(f"Matched {model_name} prediction: "
+                                       f"predicted={prediction['predicted_replicas']}, "
+                                       f"actual={current_replicas}, "
+                                       f"time_diff={time_diff_minutes:.1f}min")
+                            
+                except Exception as e:
+                    if debug_mode:
+                        logger.error(f"Error parsing prediction timestamp: {e}")
+                    continue
+    
+    if match_count > 0:
+        logger.info(f"Matched {match_count} predictions with current actual values")
 
-def calculate_mse(model_name):
-    """Calculate MSE for a specific model"""
+def calculate_mse_robust(model_name):
+    """Enhanced MSE calculation with better error handling and debugging"""
     global predictions_history
     
     if model_name not in predictions_history:
+        logger.warning(f"Model {model_name} not found in predictions history")
         return float('inf')
     
     predictions = predictions_history[model_name]
-    valid_predictions = [p for p in predictions if p['actual_replicas'] is not None]
+    matched_predictions = [p for p in predictions if p.get('matched', False) and p['actual_replicas'] is not None]
     
     min_samples = config['mse_config']['min_samples_for_mse']
-    if len(valid_predictions) < min_samples:
+    debug_mode = config['mse_config']['debug_mse_matching']
+    
+    if debug_mode:
+        logger.debug(f"{model_name}: {len(predictions)} total predictions, "
+                    f"{len(matched_predictions)} matched")
+    
+    if len(matched_predictions) < min_samples:
+        logger.info(f"{model_name} MSE: insufficient data ({len(matched_predictions)}/{min_samples} samples)")
         return float('inf')
     
-    # Calculate MSE for replica predictions
-    mse_replicas = np.mean([
-        (p['predicted_replicas'] - p['actual_replicas']) ** 2 
-        for p in valid_predictions
-    ])
+    # Use only the most recent predictions for MSE
+    window_size = config['mse_config']['mse_window_size']
+    recent_predictions = matched_predictions[-window_size:]
     
-    logger.info(f"{model_name} MSE (replicas): {mse_replicas:.3f} based on {len(valid_predictions)} samples")
-    return mse_replicas
+    try:
+        # Calculate MSE for replica predictions
+        squared_errors = []
+        for p in recent_predictions:
+            pred_val = p['predicted_replicas']
+            actual_val = p['actual_replicas']
+            if pred_val is not None and actual_val is not None:
+                squared_errors.append((pred_val - actual_val) ** 2)
+        
+        if not squared_errors:
+            return float('inf')
+        
+        mse_value = np.mean(squared_errors)
+        
+        if debug_mode:
+            logger.debug(f"{model_name} MSE calculation: {len(squared_errors)} errors, "
+                        f"mean squared error: {mse_value:.4f}")
+        
+        logger.info(f"{model_name} MSE: {mse_value:.3f} (based on {len(squared_errors)} samples)")
+        return mse_value
+        
+    except Exception as e:
+        logger.error(f"Error calculating MSE for {model_name}: {e}")
+        return float('inf')
 
 def update_mse_metrics():
-    """Update MSE for both models and Prometheus metrics"""
+    """Enhanced MSE metric updates with better Prometheus integration"""
     global gru_mse, holt_winters_mse, last_mse_calculation
     
     current_time = datetime.now()
     
-    # Update predictions with actual values
+    # Update predictions with actual values first
     update_predictions_with_actual_values()
     
     # Calculate MSE for both models
-    gru_mse = calculate_mse('gru')
-    holt_winters_mse = calculate_mse('holt_winters')
+    gru_mse = calculate_mse_robust('gru')
+    holt_winters_mse = calculate_mse_robust('holt_winters')
     
-    # Update Prometheus metrics
+    # Update Prometheus metrics - use -1 for invalid/insufficient data
     if gru_mse != float('inf'):
         prediction_mse.labels(model='gru').observe(gru_mse)
         current_mse.labels(model='gru').set(gru_mse)
+    else:
+        current_mse.labels(model='gru').set(-1)  # Signal insufficient data
     
     if holt_winters_mse != float('inf'):
         prediction_mse.labels(model='holt_winters').observe(holt_winters_mse)
         current_mse.labels(model='holt_winters').set(holt_winters_mse)
+    else:
+        current_mse.labels(model='holt_winters').set(-1)  # Signal insufficient data
     
     last_mse_calculation = current_time
     
-    logger.info(f"MSE Update - GRU: {gru_mse:.3f}, Holt-Winters: {holt_winters_mse:.3f}")
+    # Enhanced logging
+    gru_status = f"{gru_mse:.3f}" if gru_mse != float('inf') else "insufficient_data"
+    hw_status = f"{holt_winters_mse:.3f}" if holt_winters_mse != float('inf') else "insufficient_data"
+    logger.info(f"MSE Update - GRU: {gru_status}, Holt-Winters: {hw_status}")
 
 def select_best_model():
-    """Select the model with the lowest MSE"""
+    """Enhanced model selection with better decision logic"""
     global gru_mse, holt_winters_mse
     
     if not config['mse_config']['enabled']:
         # Default behavior - use GRU if trained, otherwise Holt-Winters
         if is_model_trained and gru_model is not None:
+            model_selection.labels(model='gru', reason='mse_disabled_default').inc()
             return 'gru'
         else:
+            model_selection.labels(model='holt_winters', reason='mse_disabled_gru_not_ready').inc()
             return 'holt_winters'
     
     # If we don't have enough data for MSE calculation
     if gru_mse == float('inf') and holt_winters_mse == float('inf'):
         if is_model_trained and gru_model is not None:
+            model_selection.labels(model='gru', reason='both_no_mse_gru_ready').inc()
             return 'gru'
         else:
+            model_selection.labels(model='holt_winters', reason='both_no_mse_gru_not_ready').inc()
             return 'holt_winters'
     
     # If only one model has valid MSE
@@ -354,18 +451,18 @@ def select_best_model():
             model_selection.labels(model='holt_winters', reason='gru_not_trained').inc()
             return 'holt_winters'
     
-    # Both models have valid MSE - choose the better one
+    # Both models have valid MSE - choose the better one with hysteresis
     mse_diff = abs(gru_mse - holt_winters_mse)
     threshold = config['mse_config']['mse_threshold_difference']
     
     if gru_mse < holt_winters_mse - threshold:
-        model_selection.labels(model='gru', reason='lower_mse').inc()
+        model_selection.labels(model='gru', reason='significantly_lower_mse').inc()
         return 'gru'
     elif holt_winters_mse < gru_mse - threshold:
-        model_selection.labels(model='holt_winters', reason='lower_mse').inc()
+        model_selection.labels(model='holt_winters', reason='significantly_lower_mse').inc()
         return 'holt_winters'
     else:
-        # MSEs are similar, prefer GRU if trained
+        # MSEs are similar, prefer GRU if trained (slight bias toward more complex model)
         if is_model_trained and gru_model is not None:
             model_selection.labels(model='gru', reason='similar_mse_prefer_gru').inc()
             return 'gru'
@@ -462,8 +559,8 @@ def collect_metrics_from_prometheus():
             traffic_data = [d for d in traffic_data if 
                           datetime.strptime(d['timestamp'], "%Y-%m-%d %H:%M:%S") > cutoff_time]
             
-            # Update MSE calculations every 2 minutes
-            if last_mse_calculation is None or (current_time - last_mse_calculation).total_seconds() > 120:
+            # Update MSE calculations every 90 seconds for better matching
+            if last_mse_calculation is None or (current_time - last_mse_calculation).total_seconds() > 90:
                 update_mse_metrics()
             
             # Periodically save data
@@ -868,8 +965,10 @@ def status():
             'best_model': select_best_model(),
             'last_mse_calculation': last_mse_calculation.isoformat() if last_mse_calculation else None,
             'prediction_samples': {
-                'gru': len([p for p in predictions_history['gru'] if p['actual_replicas'] is not None]),
-                'holt_winters': len([p for p in predictions_history['holt_winters'] if p['actual_replicas'] is not None])
+                'gru_matched': len([p for p in predictions_history['gru'] if p.get('matched', False)]),
+                'gru_total': len(predictions_history['gru']),
+                'holt_winters_matched': len([p for p in predictions_history['holt_winters'] if p.get('matched', False)]),
+                'holt_winters_total': len(predictions_history['holt_winters'])
             }
         }
     })
@@ -888,7 +987,7 @@ def get_metrics_data():
 
 @app.route('/predict', methods=['GET'])
 def get_prediction():
-    """Return prediction and scaling recommendation with metrics tracking."""
+    """Return prediction and scaling recommendation with enhanced MSE tracking."""
     gru_config = config["models"]["gru"]
     hw_config = config["models"]["holt_winters"]
     
@@ -914,17 +1013,25 @@ def get_prediction():
     scaling_decisions.labels(decision=decision).inc()
     recommended_replicas.set(replicas)
     
+    # Enhanced MSE status
+    gru_status = f"{gru_mse:.3f}" if gru_mse != float('inf') else "insufficient_data"
+    hw_status = f"{holt_winters_mse:.3f}" if holt_winters_mse != float('inf') else "insufficient_data"
+    
     return jsonify({
         "method": method,
         "predictions": predictions,
         "scaling_decision": decision,
         "recommended_replicas": replicas,
-        "model_selection_reason": f"MSE-based selection: GRU={gru_mse:.3f}, HW={holt_winters_mse:.3f}"
+        "model_selection_reason": f"MSE-based selection: GRU={gru_status}, HW={hw_status}",
+        "mse_debug": {
+            "gru_matched_predictions": len([p for p in predictions_history['gru'] if p.get('matched', False)]),
+            "hw_matched_predictions": len([p for p in predictions_history['holt_winters'] if p.get('matched', False)])
+        }
     })
 
 @app.route('/predict_combined', methods=['GET'])
 def predict_combined():
-    """Combined prediction endpoint with MSE-based model selection."""
+    """Combined prediction endpoint with enhanced MSE-based model selection."""
     try:
         minutes_elapsed = (datetime.now() - start_time).total_seconds() / 60
         
@@ -1012,6 +1119,10 @@ def predict_combined():
         prediction_requests.labels(method=method).inc()
         scaling_decisions.labels(decision=decision).inc()
         
+        # Enhanced MSE status reporting
+        gru_status = f"{gru_mse:.3f}" if gru_mse != float('inf') else "insufficient_data"
+        hw_status = f"{holt_winters_mse:.3f}" if holt_winters_mse != float('inf') else "insufficient_data"
+        
         return jsonify({
             'method_used': method,
             'predictions': predictions if predictions else [recommended_replicas_value],
@@ -1029,7 +1140,15 @@ def predict_combined():
                 'gru_mse': gru_mse if gru_mse != float('inf') else None,
                 'holt_winters_mse': holt_winters_mse if holt_winters_mse != float('inf') else None,
                 'best_model': select_best_model() if config['mse_config']['enabled'] else method,
-                'mse_enabled': config['mse_config']['enabled']
+                'mse_enabled': config['mse_config']['enabled'],
+                'gru_status': gru_status,
+                'hw_status': hw_status,
+                'prediction_matching': {
+                    'gru_matched': len([p for p in predictions_history['gru'] if p.get('matched', False)]),
+                    'gru_total': len(predictions_history['gru']),
+                    'hw_matched': len([p for p in predictions_history['holt_winters'] if p.get('matched', False)]),
+                    'hw_total': len(predictions_history['holt_winters'])
+                }
             }
         })
         
@@ -1103,18 +1222,30 @@ def rebuild_model():
 
 @app.route('/mse', methods=['GET'])
 def get_mse_data():
-    """Get MSE data and prediction history."""
+    """Enhanced MSE data endpoint with detailed debugging information."""
+    gru_status = f"{gru_mse:.3f}" if gru_mse != float('inf') else "insufficient_data"
+    hw_status = f"{holt_winters_mse:.3f}" if holt_winters_mse != float('inf') else "insufficient_data"
+    
     return jsonify({
         'current_mse': {
             'gru': gru_mse if gru_mse != float('inf') else None,
-            'holt_winters': holt_winters_mse if holt_winters_mse != float('inf') else None
+            'holt_winters': holt_winters_mse if holt_winters_mse != float('inf') else None,
+            'gru_status': gru_status,
+            'hw_status': hw_status
         },
         'best_model': select_best_model(),
-        'prediction_history': {
-            'gru': predictions_history['gru'][-10:],  # Last 10 predictions
-            'holt_winters': predictions_history['holt_winters'][-10:]
+        'prediction_history_summary': {
+            'gru_total': len(predictions_history['gru']),
+            'gru_matched': len([p for p in predictions_history['gru'] if p.get('matched', False)]),
+            'hw_total': len(predictions_history['holt_winters']),
+            'hw_matched': len([p for p in predictions_history['holt_winters'] if p.get('matched', False)])
         },
-        'config': config['mse_config']
+        'recent_predictions': {
+            'gru': predictions_history['gru'][-5:],  # Last 5 predictions with match status
+            'holt_winters': predictions_history['holt_winters'][-5:]
+        },
+        'config': config['mse_config'],
+        'last_mse_calculation': last_mse_calculation.isoformat() if last_mse_calculation else None
     })
 
 # Initialization function
@@ -1128,8 +1259,8 @@ def initialize():
     # Initialize metrics with zero values
     prediction_mse.labels(model="gru").observe(0.0)
     prediction_mse.labels(model="holtwinters").observe(0.0)
-    current_mse.labels(model="gru").set(0.0)
-    current_mse.labels(model="holtwinters").set(0.0)
+    current_mse.labels(model="gru").set(-1.0)  # Start with -1 (insufficient data)
+    current_mse.labels(model="holtwinters").set(-1.0)
     training_time.labels(model="gru").set(0.0)
     training_time.labels(model="holtwinters").set(0.0)
     prediction_time.labels(model="gru").set(0.0)
