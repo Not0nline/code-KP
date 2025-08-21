@@ -20,6 +20,14 @@ import statistics
 from collections import defaultdict, deque
 import sqlite3
 
+SERVICE_MAPPING = {
+    'hpa': 'http://product-app-hpa-service:80',
+    'combined': 'http://product-app-combined-service:80',
+    'both': ['http://product-app-hpa-service:80', 'http://product-app-combined-service:80']
+}
+
+AUTOSCALER_URL = 'http://predictive-scaler:5000'
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
