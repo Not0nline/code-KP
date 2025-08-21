@@ -246,11 +246,11 @@ kubectl exec -it load-test -- pip install requests numpy pandas
 
 **Run load test:**
 ```bash
-# Basic test (1 cycle)
-kubectl exec -it load-test -- python /load_test.py --target both
+# Basic test
+kubectl exec -it load-test -- python /load_test.py
 
-# both target, 3 cycles
-# kubectl exec -it load-test -- python /load_test.py --target [HPA/combined/both] --cycles 3
+# Custom parameters (for picking which model to test)
+# kubectl exec -it load-test -- python /load_test.py --target [hpa/combined/both]
 ```
 
 ## Verification and Monitoring
