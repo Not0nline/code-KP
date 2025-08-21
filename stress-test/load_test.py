@@ -39,6 +39,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def get_target_urls(target):
+    """Resolve target argument to actual service URLs"""
+    if target in SERVICE_MAPPING:
+        urls = SERVICE_MAPPING[target]
+        # Return as list for consistent handling
+        return urls if isinstance(urls, list) else [urls]
+    else:
+        # If it's not in mapping, assume it's a direct URL
+        return [target]
+
 @dataclass
 class TrafficPattern:
     name: str
@@ -58,6 +68,7 @@ class RequestResult:
     status_code: int
     response_time: float
     endpoint: str
+    service_url: str  # Added to track which service was tested
     error: Optional[str] = None
     thread_id: Optional[str] = None
     target_rps: Optional[float] = None
@@ -82,8 +93,8 @@ class MetricsSnapshot:
     autoscaler_status: Optional[str] = None
 
 class StressTestRunner:
-    def __init__(self, target_url: str, autoscaler_url: str = None):
-        self.target_url = target_url.rstrip('/')
+    def __init__(self, target_urls: List[str], autoscaler_url: str = None):
+        self.target_urls = [url.rstrip('/') for url in target_urls]
         self.autoscaler_url = autoscaler_url.rstrip('/') if autoscaler_url else None
         self.running = False
         self.start_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -101,6 +112,7 @@ class StressTestRunner:
             'error_counts': defaultdict(int),
             'status_code_counts': defaultdict(int),
             'endpoint_stats': defaultdict(lambda: {'requests': 0, 'successes': 0, 'failures': 0, 'total_time': 0}),
+            'service_stats': defaultdict(lambda: {'requests': 0, 'successes': 0, 'failures': 0, 'total_time': 0}),
             'hourly_stats': defaultdict(lambda: {'requests': 0, 'successes': 0, 'failures': 0}),
             'rps_history': deque(maxlen=3600),  # Keep last hour of RPS data
             'response_time_history': deque(maxlen=1000),  # Keep last 1000 response times for rolling stats
@@ -223,7 +235,7 @@ class StressTestRunner:
             # Detailed requests CSV
             with open(self.csv_requests_file, 'w', newline='') as csvfile:
                 fieldnames = ['request_id', 'timestamp', 'pattern_name', 'cycle', 'success', 'status_code', 
-                             'response_time', 'endpoint', 'error', 'thread_id', 'target_rps', 'actual_rps']
+                             'response_time', 'endpoint', 'service_url', 'error', 'thread_id', 'target_rps', 'actual_rps']
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
             
@@ -247,7 +259,7 @@ class StressTestRunner:
             # Error analysis CSV  
             with open(self.csv_errors_file, 'w', newline='') as csvfile:
                 fieldnames = ['timestamp', 'pattern_name', 'cycle', 'error_type', 'status_code', 'error_message',
-                             'endpoint', 'response_time', 'occurrence_count']
+                             'endpoint', 'service_url', 'response_time', 'occurrence_count']
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
                 
@@ -272,6 +284,7 @@ class StressTestRunner:
                     status_code INTEGER,
                     response_time REAL,
                     endpoint TEXT,
+                    service_url TEXT,
                     error TEXT,
                     thread_id TEXT,
                     target_rps REAL,
@@ -347,6 +360,9 @@ class StressTestRunner:
             self.active_threads += 1
         
         try:
+            # Select random service URL if multiple targets
+            target_url = random.choice(self.target_urls)
+            
             # Vary the endpoints to simulate real traffic
             endpoints = [
                 '/health',
@@ -361,7 +377,7 @@ class StressTestRunner:
                 '/api/recommendations'
             ]
             endpoint = random.choice(endpoints)
-            url = f"{self.target_url}{endpoint}"
+            url = f"{target_url}{endpoint}"
             
             # Add some query parameters occasionally for realism
             if random.random() < 0.3:
@@ -387,6 +403,7 @@ class StressTestRunner:
                 status_code=response.status_code,
                 response_time=response_time,
                 endpoint=endpoint,
+                service_url=target_url,
                 thread_id=str(thread_id),
                 target_rps=target_rps,
                 actual_rps=self.calculate_actual_rps()
@@ -398,12 +415,16 @@ class StressTestRunner:
                 if success:
                     self.stats['successful_requests'] += 1
                     self.stats['endpoint_stats'][endpoint]['successes'] += 1
+                    self.stats['service_stats'][target_url]['successes'] += 1
                 else:
                     self.stats['failed_requests'] += 1
                     self.stats['endpoint_stats'][endpoint]['failures'] += 1
+                    self.stats['service_stats'][target_url]['failures'] += 1
                 
                 self.stats['endpoint_stats'][endpoint]['requests'] += 1
                 self.stats['endpoint_stats'][endpoint]['total_time'] += response_time
+                self.stats['service_stats'][target_url]['requests'] += 1
+                self.stats['service_stats'][target_url]['total_time'] += response_time
                 self.stats['response_times'].append(response_time)
                 self.stats['response_time_history'].append(response_time)
                 self.stats['status_code_counts'][response.status_code] += 1
@@ -432,6 +453,7 @@ class StressTestRunner:
                 status_code=0,
                 response_time=response_time,
                 endpoint=endpoint if 'endpoint' in locals() else 'unknown',
+                service_url=target_url if 'target_url' in locals() else 'unknown',
                 error=error_msg,
                 thread_id=str(thread_id),
                 target_rps=target_rps,
@@ -450,6 +472,11 @@ class StressTestRunner:
                     self.stats['endpoint_stats'][endpoint]['requests'] += 1
                     self.stats['endpoint_stats'][endpoint]['failures'] += 1
                     self.stats['endpoint_stats'][endpoint]['total_time'] += response_time
+                
+                if 'target_url' in locals():
+                    self.stats['service_stats'][target_url]['requests'] += 1
+                    self.stats['service_stats'][target_url]['failures'] += 1
+                    self.stats['service_stats'][target_url]['total_time'] += response_time
             
             return result
         
@@ -478,7 +505,7 @@ class StressTestRunner:
             with self.csv_lock:
                 with open(self.csv_requests_file, 'a', newline='') as csvfile:
                     fieldnames = ['request_id', 'timestamp', 'pattern_name', 'cycle', 'success', 'status_code',
-                                 'response_time', 'endpoint', 'error', 'thread_id', 'target_rps', 'actual_rps']
+                                 'response_time', 'endpoint', 'service_url', 'error', 'thread_id', 'target_rps', 'actual_rps']
                     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                     
                     row = {
@@ -490,6 +517,7 @@ class StressTestRunner:
                         'status_code': result.status_code,
                         'response_time': result.response_time,
                         'endpoint': result.endpoint,
+                        'service_url': result.service_url,
                         'error': result.error or '',
                         'thread_id': result.thread_id,
                         'target_rps': result.target_rps,
@@ -506,10 +534,10 @@ class StressTestRunner:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO requests (id, timestamp, pattern_name, cycle, success, status_code,
-                                    response_time, endpoint, error, thread_id, target_rps, actual_rps)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    response_time, endpoint, service_url, error, thread_id, target_rps, actual_rps)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (result.id, result.timestamp, result.pattern_name, result.cycle, result.success,
-                  result.status_code, result.response_time, result.endpoint, result.error,
+                  result.status_code, result.response_time, result.endpoint, result.service_url, result.error,
                   result.thread_id, result.target_rps, result.actual_rps))
             conn.commit()
             conn.close()
@@ -576,6 +604,7 @@ class StressTestRunner:
         """Execute a specific traffic pattern with comprehensive tracking."""
         logger.info(f"Starting pattern: {pattern.name} - {pattern.description}")
         logger.info(f"Duration: {pattern.duration_minutes} minutes, RPS: {pattern.base_rps} -> {pattern.peak_rps}")
+        logger.info(f"Testing services: {self.target_urls}")
         
         self.current_pattern = pattern
         start_time = time.time()
@@ -786,7 +815,7 @@ class StressTestRunner:
             with self.csv_lock:
                 with open(self.csv_errors_file, 'a', newline='') as csvfile:
                     fieldnames = ['timestamp', 'pattern_name', 'cycle', 'error_type', 'status_code', 'error_message',
-                                 'endpoint', 'response_time', 'occurrence_count']
+                                 'endpoint', 'service_url', 'response_time', 'occurrence_count']
                     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                     
                     for error, count in error_details.items():
@@ -807,6 +836,7 @@ class StressTestRunner:
                             'status_code': status_code,
                             'error_message': error_message,
                             'endpoint': 'various',
+                            'service_url': 'various',
                             'response_time': 'N/A',
                             'occurrence_count': count
                         }
@@ -817,7 +847,7 @@ class StressTestRunner:
     def run_test(self, cycles: int = 1):
         """Run the complete stress test with comprehensive tracking."""
         logger.info(f"Starting enhanced stress test with {cycles} cycle(s)")
-        logger.info(f"Target URL: {self.target_url}")
+        logger.info(f"Target URLs: {self.target_urls}")
         logger.info(f"Output directory: {self.output_dir}")
         if self.autoscaler_url:
             logger.info(f"Autoscaler URL: {self.autoscaler_url}")
@@ -919,6 +949,18 @@ class StressTestRunner:
                         'success_rate': (stats['successes'] / stats['requests']) * 100,
                         'avg_response_time': stats['total_time'] / stats['requests']
                     }
+            
+            # Service statistics
+            service_stats = {}
+            for service_url, stats in self.stats['service_stats'].items():
+                if stats['requests'] > 0:
+                    service_stats[service_url] = {
+                        'total_requests': stats['requests'],
+                        'successful_requests': stats['successes'],
+                        'failed_requests': stats['failures'],
+                        'success_rate': (stats['successes'] / stats['requests']) * 100,
+                        'avg_response_time': stats['total_time'] / stats['requests']
+                    }
         
         # Get final autoscaler status
         final_autoscaler_status = self.get_autoscaler_status()
@@ -929,7 +971,7 @@ class StressTestRunner:
                 'start_time': self.stats['start_time'].isoformat(),
                 'end_time': self.stats['end_time'].isoformat(),
                 'duration_seconds': duration.total_seconds(),
-                'target_url': self.target_url,
+                'target_urls': self.target_urls,
                 'autoscaler_url': self.autoscaler_url,
                 'output_directory': self.output_dir
             },
@@ -947,6 +989,7 @@ class StressTestRunner:
                 'percentiles': percentiles
             },
             'endpoint_stats': endpoint_stats,
+            'service_stats': service_stats,
             'status_code_distribution': dict(self.stats['status_code_counts']),
             'error_distribution': dict(self.stats['error_counts']),
             'hourly_stats': dict(self.stats['hourly_stats']),
@@ -993,6 +1036,26 @@ class StressTestRunner:
                             'total_time': stats['total_time']
                         })
             
+            # Service performance report
+            service_perf_file = os.path.join(self.output_dir, "service_performance.csv")
+            with open(service_perf_file, 'w', newline='') as csvfile:
+                fieldnames = ['service_url', 'total_requests', 'successful_requests', 'failed_requests',
+                             'success_rate', 'avg_response_time', 'total_time']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                for service_url, stats in self.stats['service_stats'].items():
+                    if stats['requests'] > 0:
+                        writer.writerow({
+                            'service_url': service_url,
+                            'total_requests': stats['requests'],
+                            'successful_requests': stats['successes'],
+                            'failed_requests': stats['failures'],
+                            'success_rate': (stats['successes'] / stats['requests']) * 100,
+                            'avg_response_time': stats['total_time'] / stats['requests'],
+                            'total_time': stats['total_time']
+                        })
+            
             # Hourly statistics report
             hourly_stats_file = os.path.join(self.output_dir, "hourly_statistics.csv")
             with open(hourly_stats_file, 'w', newline='') as csvfile:
@@ -1028,7 +1091,7 @@ class StressTestRunner:
         print(f"{'='*70}")
         print(f"Test Duration: {duration}")
         print(f"Output Directory: {self.output_dir}")
-        print(f"Target URL: {self.target_url}")
+        print(f"Target URLs: {self.target_urls}")
         if self.autoscaler_url:
             print(f"Autoscaler URL: {self.autoscaler_url}")
         
@@ -1068,6 +1131,18 @@ class StressTestRunner:
                   f"{pattern['success_rate']:<10.1f} "
                   f"{pattern['avg_response_time']:<10.3f} "
                   f"{pattern['max_response_time']:<10.3f}")
+        
+        if self.stats['service_stats'] and len(self.target_urls) > 1:
+            print(f"\n{'='*50}")
+            print("SERVICE PERFORMANCE COMPARISON")
+            print(f"{'='*50}")
+            print(f"{'Service':<35} {'Requests':<10} {'Success %':<10} {'Avg RT':<10}")
+            print("-" * 70)
+            for service_url, stats in sorted(self.stats['service_stats'].items()):
+                if stats['requests'] > 0:
+                    success_rate_svc = (stats['successes'] / stats['requests']) * 100
+                    avg_rt_svc = stats['total_time'] / stats['requests']
+                    print(f"{service_url:<35} {stats['requests']:<10} {success_rate_svc:<10.1f} {avg_rt_svc:<10.3f}")
         
         if self.stats['endpoint_stats']:
             print(f"\n{'='*50}")
@@ -1136,6 +1211,7 @@ class StressTestRunner:
         print(f"Pattern Summary: {self.csv_summary_file}")
         print(f"Error Analysis: {self.csv_errors_file}")
         print(f"Endpoint Performance: {os.path.join(self.output_dir, 'endpoint_performance.csv')}")
+        print(f"Service Performance: {os.path.join(self.output_dir, 'service_performance.csv')}")
         print(f"Hourly Statistics: {os.path.join(self.output_dir, 'hourly_statistics.csv')}")
         print(f"JSON Report: {self.json_report_file}")
         print(f"SQLite Database: {self.db_file}")
@@ -1153,7 +1229,8 @@ def signal_handler(signum, frame):
 
 def main():
     parser = argparse.ArgumentParser(description='Enhanced Stress Test for Predictive Autoscaler')
-    parser.add_argument('--target', required=True, help='Target application URL (e.g., http://localhost:8080)')
+    parser.add_argument('--target', required=True, 
+                        help='Target service key (hpa, combined, both) or direct URL')
     parser.add_argument('--autoscaler', help='Autoscaler URL (e.g., http://localhost:5000)')
     parser.add_argument('--cycles', type=int, default=1, help='Number of test cycles to run')
     parser.add_argument('--dry-run', action='store_true', help='Show traffic patterns without running test')
@@ -1164,10 +1241,15 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
+    # Resolve target URLs
+    target_urls = get_target_urls(args.target)
+    logger.info(f"Resolved target '{args.target}' to URLs: {target_urls}")
+    
     global runner
-    runner = StressTestRunner(args.target, args.autoscaler)
+    runner = StressTestRunner(target_urls, args.autoscaler)
     
     if args.dry_run:
+        print(f"Target services: {target_urls}")
         print("Traffic patterns that would be executed:")
         for i, pattern in enumerate(runner.traffic_patterns):
             print(f"{i+1}. {pattern.name} ({pattern.duration_minutes} min): {pattern.description}")
@@ -1177,13 +1259,14 @@ def main():
         print(f"Total duration for {args.cycles} cycles: {total_duration * args.cycles} minutes")
         return
     
-    # Verify target is accessible
-    try:
-        response = requests.get(f"{args.target}/health", timeout=5)
-        logger.info(f"Target health check: {response.status_code}")
-    except Exception as e:
-        logger.error(f"Cannot reach target URL {args.target}: {e}")
-        sys.exit(1)
+    # Verify target services are accessible
+    for target_url in target_urls:
+        try:
+            response = requests.get(f"{target_url}/health", timeout=5)
+            logger.info(f"Target {target_url} health check: {response.status_code}")
+        except Exception as e:
+            logger.error(f"Cannot reach target URL {target_url}: {e}")
+            sys.exit(1)
     
     # Verify autoscaler is accessible if provided
     if args.autoscaler:

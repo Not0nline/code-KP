@@ -250,7 +250,7 @@ kubectl exec -it load-test -- pip install requests numpy pandas
 kubectl exec -it load-test -- python /load_test.py --target both
 
 # both target, 3 cycles
-# kubectl exec -it load-test -- python /stress_test.py --target [HPA/combined/both] --cycles 3
+# kubectl exec -it load-test -- python /load_test.py --target [HPA/combined/both] --cycles 3
 ```
 
 ## Verification and Monitoring
