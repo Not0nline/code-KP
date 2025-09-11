@@ -104,7 +104,7 @@ config = {
     },
     "mse_config": {
         "enabled": True,
-        "min_samples_for_mse": 10,  # Minimum samples needed to calculate MSE
+        "min_samples_for_mse": 3,  # Minimum samples needed to calculate MSE
         "mse_window_size": 30,  # Increased window for better MSE calculation
         "mse_threshold_difference": 0.5,  # Min difference between MSEs to switch models
         "prediction_match_tolerance_minutes": 5,  # How long to wait for actual values
@@ -287,50 +287,59 @@ def add_prediction_to_history(model_name, predicted_replicas, timestamp):
 
 def update_predictions_with_actual_values():
     """Enhanced prediction-to-actual matching with flexible time windows"""
-    global predictions_history
+    global predictions_history, traffic_data
     
     if not traffic_data:
         return
-    
-    current_time = datetime.now()
-    current_replicas = traffic_data[-1]['replicas']
-    current_cpu = traffic_data[-1]['cpu_utilization']
-    
-    tolerance_minutes = config['mse_config']['prediction_match_tolerance_minutes']
-    debug_mode = config['mse_config']['debug_mse_matching']
-    
+
     match_count = 0
+    now = datetime.now()
     
-    # Update both model histories
+    # Convert traffic_data timestamps to datetime objects for faster comparison
+    for point in traffic_data:
+        if isinstance(point['timestamp'], str):
+            point['timestamp_dt'] = datetime.strptime(point['timestamp'], "%Y-%m-%d %H:%M:%S")
+
     for model_name in ['gru', 'holt_winters']:
         for prediction in predictions_history[model_name]:
-            if not prediction['matched']:  # Only process unmatched predictions
+            if not prediction.get('matched', False):
                 try:
                     pred_time = datetime.strptime(prediction['timestamp'], "%Y-%m-%d %H:%M:%S")
-                    time_diff_seconds = (current_time - pred_time).total_seconds()
-                    time_diff_minutes = time_diff_seconds / 60
                     
-                    # Use flexible matching window (1-8 minutes)
-                    if 60 <= time_diff_seconds <= (tolerance_minutes * 60):
-                        prediction['actual_replicas'] = current_replicas
-                        prediction['actual_cpu'] = current_cpu
+                    # Find the closest data point in traffic_data
+                    best_match = None
+                    min_time_diff = float('inf')
+
+                    for data_point in traffic_data:
+                        data_time = data_point.get('timestamp_dt')
+                        if not data_time:
+                            continue
+
+                        time_diff = abs((data_time - pred_time).total_seconds())
+                        
+                        # Match if within tolerance window (e.g., 5 minutes)
+                        if time_diff < config['mse_config']['prediction_match_tolerance_minutes'] * 60:
+                            if time_diff < min_time_diff:
+                                min_time_diff = time_diff
+                                best_match = data_point
+                    
+                    if best_match:
+                        prediction['actual_replicas'] = best_match['replicas']
+                        prediction['actual_cpu'] = best_match['cpu_utilization']
                         prediction['matched'] = True
-                        prediction['match_timestamp'] = current_time.strftime("%Y-%m-%d %H:%M:%S")
+                        prediction['match_timestamp'] = now.strftime("%Y-%m-%d %H:%M:%S")
                         match_count += 1
                         
-                        if debug_mode:
-                            logger.debug(f"Matched {model_name} prediction: "
-                                       f"predicted={prediction['predicted_replicas']}, "
-                                       f"actual={current_replicas}, "
-                                       f"time_diff={time_diff_minutes:.1f}min")
-                            
+                        if config['mse_config']['debug_mse_matching']:
+                            logger.debug(f"Matched {model_name} prediction at {prediction['timestamp']} with data from {best_match['timestamp']}: "
+                                       f"predicted={prediction['predicted_replicas']}, actual={best_match['replicas']}")
+
                 except Exception as e:
-                    if debug_mode:
-                        logger.error(f"Error parsing prediction timestamp: {e}")
-                    continue
-    
+                    if config['mse_config']['debug_mse_matching']:
+                        logger.error(f"Error matching prediction: {e}")
+
     if match_count > 0:
-        logger.info(f"Matched {match_count} predictions with current actual values")
+        logger.info(f"Matched {match_count} predictions with historical data.")
 
 def calculate_mse_robust(model_name):
     """Enhanced MSE calculation with better error handling and debugging"""

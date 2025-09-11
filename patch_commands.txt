@@ -1,2 +1,30 @@
 
 kubectl patch svc predictive-scaler -p '{"metadata":{"labels":{"app":"predictive-scaler"}},"spec":{"ports":[{"name":"http","port":5000,"targetPort":5000,"protocol":"TCP"}]}}'
+
+kubectl patch deployment predictive-scaler --type='json' -p='[
+  {"op": "replace", "path": "/spec/template/spec/containers/0/resources/limits/memory", "value": "1Gi"},
+  {"op": "replace", "path": "/spec/template/spec/containers/0/resources/requests/memory", "value": "512Mi"}
+]'
+
+
+# First, let's see what the current PROMETHEUS_SERVER env vars are set to
+kubectl get deployment scaling-controller -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="PROMETHEUS_SERVER")].value}'
+echo ""
+kubectl get deployment scaling-controller-combined -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="PROMETHEUS_SERVER")].value}'
+
+# Update scaling-controller
+kubectl patch deployment scaling-controller --type='json' -p='[
+  {"op": "replace", "path": "/spec/template/spec/containers/0/env/4/value", "value": "http://prometheus-operated.monitoring.svc.cluster.local:9090"}
+]'
+
+# Update scaling-controller-combined  
+kubectl patch deployment scaling-controller-combined --type='json' -p='[
+  {"op": "replace", "path": "/spec/template/spec/containers/0/env/6/value", "value": "http://prometheus-operated.monitoring.svc.cluster.local:9090"}
+]'
+
+# Check current predictive scaler env
+kubectl get deployment predictive-scaler -o jsonpath='{.spec.template.spec.containers[0].env}'
+
+# If it has a PROMETHEUS_URL or similar, update it
+kubectl set env deployment/predictive-scaler PROMETHEUS_URL=http://prometheus-operated.monitoring.svc.cluster.local:9090
+

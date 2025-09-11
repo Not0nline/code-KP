@@ -1,0 +1,14 @@
+echo "=== Pod Status ==="
+kubectl get pods -l app=predictive-scaler -o wide
+echo "=== Memory Usage ==="
+kubectl top pods -l app=predictive-scaler 2>/dev/null || echo "Metrics not ready yet"
+echo "=== Health Check ==="
+kubectl exec diag-curl -- curl -sS -m 3 http://predictive-scaler:5000/health 2>/dev/null || echo "Health check failed"
+echo "=== Recent Logs ==="
+kubectl logs deployment/predictive-scaler --tail=5 | grep -E "(ERROR|WARNING|MSE|Worker)" || echo "No recent errors"
+
+
+
+kubectl -n kube-system get deploy metrics-server
+kubectl get apiservices | grep metrics
+kubectl -n kube-system logs deploy/metrics-server --tail=50
