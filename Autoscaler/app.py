@@ -104,8 +104,8 @@ config = {
     },
     "mse_config": {
         "enabled": True,
-        "min_samples_for_mse": 3,  # Minimum samples needed to calculate MSE
-        "mse_window_size": 30,  # Increased window for better MSE calculation
+        "min_samples_for_mse": 1,  # Minimum samples needed to calculate MSE
+        "mse_window_size": 10,  # Increased window for better MSE calculation
         "mse_threshold_difference": 0.5,  # Min difference between MSEs to switch models
         "prediction_match_tolerance_minutes": 5,  # How long to wait for actual values
         "max_prediction_age_hours": 2,  # Remove predictions older than this
@@ -568,8 +568,8 @@ def collect_metrics_from_prometheus():
             traffic_data = [d for d in traffic_data if 
                           datetime.strptime(d['timestamp'], "%Y-%m-%d %H:%M:%S") > cutoff_time]
             
-            # Update MSE calculations every 90 seconds for better matching
-            if last_mse_calculation is None or (current_time - last_mse_calculation).total_seconds() > 90:
+            # Update MSE calculations every 30 seconds for better matching
+            if last_mse_calculation is None or (current_time - last_mse_calculation).total_seconds() > 30:
                 update_mse_metrics()
             
             # Periodically save data
@@ -691,28 +691,12 @@ def predict_with_holtwinters(steps=None):
         steps = int(hw_config["look_forward"])
     
     try:
-        if len(traffic_data) < 3:
+        if len(traffic_data) < 12: # Need enough data for seasonal period
             logger.info("Not enough data for Holt-Winters prediction")
             return None
         
         # Use replicas history
-        replicas = [d['replicas'] for d in traffic_data[-12:]]  # Last hour
-        
-        if len(set(replicas)) == 1:  # All values are the same
-            # Check if we should scale down due to low usage
-            recent_cpu = [d['cpu_utilization'] for d in traffic_data[-5:]]
-            avg_cpu = sum(recent_cpu) / len(recent_cpu) if recent_cpu else 0
-            
-            if avg_cpu < config['cost_optimization']['scale_down_threshold']:
-                prediction = max(1, replicas[-1] - 1)
-            else:
-                prediction = replicas[-1]
-            
-            # Add prediction to history for MSE calculation
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            add_prediction_to_history('holt_winters', prediction, timestamp)
-            
-            return [prediction] * steps
+        replicas = [d['replicas'] for d in traffic_data[-60:]] # Use up to 5 mins of data
         
         # Fit Holt-Winters with original hyperparameters
         model = ExponentialSmoothing(
@@ -733,7 +717,7 @@ def predict_with_holtwinters(steps=None):
         forecast = [max(1, min(10, round(p))) for p in forecast]
         
         # Add prediction to history for MSE calculation
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = (datetime.now() + timedelta(seconds=config['collection_interval'])).strftime("%Y-%m-%d %H:%M:%S")
         add_prediction_to_history('holt_winters', forecast[0], timestamp)
         
         elapsed_ms = (time.time() - start_time_func) * 1000
