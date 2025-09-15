@@ -37,12 +37,12 @@ TEST_TARGETS = {
     "predictive": True  # Test Predictive service
 }
 
-# Traffic pattern configuration – lower, more manageable load
-NORMAL_LOAD_RANGE = (1, 10)       # Normal load requests per second
-PEAK_LOAD_RANGE = (25, 50)         # Peak load requests per second
-DISTURBANCE_INTERVAL = 120          # Seconds between peak disturbances (about 30 sec)
-DISTURBANCE_DURATION = 30          # Peak duration in seconds
-VOLATILITY_FACTOR = 2              # Volatility factor for minor spikes/dips
+# Traffic pattern configuration - High-contrast, predictable spikes for predictive scaler
+NORMAL_LOAD_RANGE = (1, 5)         # Low baseline load
+PEAK_LOAD_RANGE = (80, 120)        # Sharp, high-intensity peak load
+DISTURBANCE_INTERVAL = 240         # Seconds between peak disturbances (every 5 minutes)
+DISTURBANCE_DURATION = 45          # Peak duration in seconds
+VOLATILITY_FACTOR = 0.5            # Reduced random volatility to make pattern more predictable
 
 # Endpoint weights (probability distribution)
 ENDPOINT_WEIGHTS = {

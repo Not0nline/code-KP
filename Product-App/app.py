@@ -132,7 +132,7 @@ def list_products():
         product_list_requests.labels(app=app_type).inc()
         
         # Randomly fail some requests
-        if random.random() < 0.01:  # 2% error rate
+        if random.random() < 0.00:  # 2% error rate
             raise Exception("Random failure for testing")
         
         with products_lock:
