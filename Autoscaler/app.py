@@ -153,7 +153,9 @@ prometheus_client = None
 low_traffic_start_time = None
 consecutive_low_cpu_count = 0
 
-# Enhanced MSE tracking variables
+# Enhanced MSE tracking variables with MinHeap system
+# The MinHeap system uses MSE (Mean Squared Error) to rank models and make scaling decisions
+# Lower MSE = Better model performance = Higher priority in the heap
 predictions_history = {
     'gru': [],
     'holt_winters': []
@@ -837,59 +839,86 @@ def predict_with_ensemble(steps=1):
         logger.error(f"Error in ensemble prediction: {e}")
         return [2]  # Safe fallback
 
-def select_best_model():
-    """Enhanced model selection with better decision logic"""
+def select_best_model_with_minheap():
+    """MinHeap-based model selection using MSE as the primary criterion"""
     global gru_mse, holt_winters_mse
     
-    if not config['mse_config']['enabled']:
-        # Default behavior - use GRU if trained, otherwise Holt-Winters
-        if is_model_trained and gru_model is not None:
-            model_selection.labels(model='gru', reason='mse_disabled_default').inc()
-            return 'gru'
-        else:
-            model_selection.labels(model='holt_winters', reason='mse_disabled_gru_not_ready').inc()
-            return 'holt_winters'
+    # Create a min heap with (MSE, model_name, model_ready_status)
+    model_heap = []
     
-    # If we don't have enough data for MSE calculation
-    if gru_mse == float('inf') and holt_winters_mse == float('inf'):
-        if is_model_trained and gru_model is not None:
-            model_selection.labels(model='gru', reason='both_no_mse_gru_ready').inc()
-            return 'gru'
-        else:
-            model_selection.labels(model='holt_winters', reason='both_no_mse_gru_not_ready').inc()
-            return 'holt_winters'
-    
-    # If only one model has valid MSE
-    if gru_mse == float('inf'):
-        model_selection.labels(model='holt_winters', reason='gru_no_mse').inc()
-        return 'holt_winters'
-    
-    if holt_winters_mse == float('inf'):
-        if is_model_trained and gru_model is not None:
-            model_selection.labels(model='gru', reason='hw_no_mse').inc()
-            return 'gru'
-        else:
-            model_selection.labels(model='holt_winters', reason='gru_not_trained').inc()
-            return 'holt_winters'
-    
-    # Both models have valid MSE - choose the better one with hysteresis
-    mse_diff = abs(gru_mse - holt_winters_mse)
-    threshold = config['mse_config']['mse_threshold_difference']
-    
-    if gru_mse < holt_winters_mse - threshold:
-        model_selection.labels(model='gru', reason='significantly_lower_mse').inc()
-        return 'gru'
-    elif holt_winters_mse < gru_mse - threshold:
-        model_selection.labels(model='holt_winters', reason='significantly_lower_mse').inc()
-        return 'holt_winters'
+    # Add GRU to heap if available
+    if is_model_trained and gru_model is not None:
+        gru_mse_value = gru_mse if gru_mse != float('inf') else float('inf')
+        heapq.heappush(model_heap, (gru_mse_value, 'gru', True))
+        logger.debug(f"Added GRU to minheap: MSE={gru_mse_value}")
     else:
-        # MSEs are similar, prefer GRU if trained (slight bias toward more complex model)
+        # Add GRU with infinite MSE if not ready
+        heapq.heappush(model_heap, (float('inf'), 'gru', False))
+        logger.debug("Added GRU to minheap: MSE=inf (not ready)")
+    
+    # Add Holt-Winters to heap (always available)
+    hw_mse_value = holt_winters_mse if holt_winters_mse != float('inf') else float('inf')
+    heapq.heappush(model_heap, (hw_mse_value, 'holt_winters', True))
+    logger.debug(f"Added Holt-Winters to minheap: MSE={hw_mse_value}")
+    
+    # Add ensemble model if we have predictions from multiple models
+    ensemble_mse = calculate_ensemble_mse()
+    if ensemble_mse != float('inf'):
+        heapq.heappush(model_heap, (ensemble_mse, 'ensemble', True))
+        logger.debug(f"Added Ensemble to minheap: MSE={ensemble_mse}")
+    
+    # Select models based on minheap (lowest MSE first)
+    selected_models = []
+    mse_threshold = config['mse_config']['mse_threshold_difference']
+    
+    while model_heap and len(selected_models) < 2:
+        mse_value, model_name, is_ready = heapq.heappop(model_heap)
+        
+        if is_ready and mse_value != float('inf'):
+            selected_models.append((mse_value, model_name))
+            logger.info(f"🏆 MinHeap selected: {model_name} with MSE={mse_value:.4f}")
+        elif is_ready and not selected_models:  # Fallback if no model has valid MSE
+            selected_models.append((mse_value, model_name))
+            logger.warning(f"⚠️ MinHeap fallback: {model_name} with MSE={mse_value}")
+    
+    if not selected_models:
+        # Ultimate fallback
+        model_selection.labels(model='holt_winters', reason='minheap_ultimate_fallback').inc()
+        logger.error("❌ MinHeap selection failed, using ultimate fallback")
+        return 'holt_winters'
+    
+    # Use the best model (lowest MSE)
+    best_mse, best_model = selected_models[0]
+    
+    # Check if MSE is disabled
+    if not config['mse_config']['enabled']:
         if is_model_trained and gru_model is not None:
-            model_selection.labels(model='gru', reason='similar_mse_prefer_gru').inc()
+            model_selection.labels(model='gru', reason='mse_disabled_prefer_gru').inc()
             return 'gru'
         else:
-            model_selection.labels(model='holt_winters', reason='similar_mse_gru_not_ready').inc()
+            model_selection.labels(model='holt_winters', reason='mse_disabled_fallback').inc()
             return 'holt_winters'
+    
+    # Log minheap decision
+    reason = f"minheap_lowest_mse_{best_mse:.4f}"
+    model_selection.labels(model=best_model, reason=reason).inc()
+    
+    logger.info(f"🎯 MinHeap final selection: {best_model} (MSE: {best_mse:.4f})")
+    return best_model
+
+def calculate_ensemble_mse():
+    """Calculate MSE for ensemble predictions if available"""
+    try:
+        if 'ensemble' in predictions_history:
+            return calculate_mse_robust('ensemble')
+        return float('inf')
+    except Exception as e:
+        logger.debug(f"Failed to calculate ensemble MSE: {e}")
+        return float('inf')
+
+def select_best_model():
+    """Enhanced model selection using MinHeap system for MSE-based decisions"""
+    return select_best_model_with_minheap()
 
 def load_model_components():
     """Load GRU model and scalers with enhanced validation"""
@@ -2012,8 +2041,8 @@ def predict_with_advanced_gru(steps=None):
         logger.error(f"🚨 Advanced GRU ERROR: {e}, falling back to basic GRU")
         return predict_with_gru(steps)
 
-def make_scaling_decision(predictions):
-    """Determine if scaling is needed based on predictions with improved cost optimization."""
+def make_scaling_decision_with_minheap(predictions):
+    """MinHeap-based scaling decision using MSE-ranked model predictions"""
     global last_scaling_time, last_scale_up_time, last_scale_down_time, low_traffic_start_time, consecutive_low_cpu_count
     
     if not traffic_data:
@@ -2027,7 +2056,10 @@ def make_scaling_decision(predictions):
     
     cost_config = config.get('cost_optimization', {})
     
-    # Check for idle/low traffic conditions
+    # Create decision heap: (priority_score, decision, replicas, reason)
+    decision_heap = []
+    
+    # Basic cost optimization decisions (highest priority for extreme cases)
     if cost_config.get('enabled', True):
         scale_up_threshold = cost_config.get('scale_up_threshold', 80)
         scale_down_threshold = cost_config.get('scale_down_threshold', 20)
@@ -2037,61 +2069,124 @@ def make_scaling_decision(predictions):
         idle_scale_minutes = cost_config.get('idle_scale_down_minutes', 5)
         zero_traffic_threshold = cost_config.get('zero_traffic_threshold', 0.1)
         
-        # Immediate scale down for zero/very low traffic after idle period
+        # Priority 1: Emergency scale down for idle periods (highest priority)
         if low_traffic_start_time is not None:
             idle_duration_minutes = (datetime.now() - low_traffic_start_time).total_seconds() / 60
             if idle_duration_minutes >= idle_scale_minutes and current_replicas > min_replicas:
-                logger.info(f"Idle for {idle_duration_minutes:.1f} minutes, scaling down to minimum")
-                last_scale_down_time = current_time
-                return "scale_down", min_replicas
+                heapq.heappush(decision_heap, (1.0, "scale_down", min_replicas, f"idle_{idle_duration_minutes:.1f}min"))
         
-        # Check for sustained low CPU (need multiple consecutive readings)
+        # Priority 2: Sustained low CPU (high priority)
         if consecutive_low_cpu_count >= 3 and current_replicas > min_replicas:
-            # Check cooldown for scale down
             if current_time - last_scale_down_time >= scale_down_delay:
-                logger.info(f"Sustained low CPU ({current_cpu:.1f}%) for {consecutive_low_cpu_count} intervals, scaling down")
                 recommended = max(min_replicas, current_replicas - 1)
-                last_scale_down_time = current_time
-                return "scale_down", recommended
+                heapq.heappush(decision_heap, (2.0, "scale_down", recommended, f"sustained_low_cpu_{consecutive_low_cpu_count}"))
         
-        # Normal scaling logic with predictions
-        if predictions and len(predictions) > 0:
-            predicted_replicas = predictions[0] if isinstance(predictions[0], (int, float)) else current_replicas
-            
-            # Scale up logic
-            if current_cpu > scale_up_threshold:
-                if current_time - last_scale_up_time >= 60:  # 1 minute cooldown for scale up
+        # Priority 3: High CPU requires immediate scale up
+        if current_cpu > scale_up_threshold:
+            if current_time - last_scale_up_time >= 60:
+                if predictions and len(predictions) > 0:
+                    predicted_replicas = predictions[0] if isinstance(predictions[0], (int, float)) else current_replicas
                     recommended = min(max_replicas_limit, max(predicted_replicas, current_replicas + 1))
-                    if recommended > current_replicas:
-                        last_scale_up_time = current_time
-                        return "scale_up", int(recommended)
-            
-            # Scale down logic - more aggressive
-            elif current_cpu < scale_down_threshold and current_replicas > min_replicas:
-                if current_time - last_scale_down_time >= scale_down_delay:
-                    # Consider both prediction and current state
-                    recommended = max(min_replicas, min(predicted_replicas, current_replicas - 1))
-                    if recommended < current_replicas:
-                        last_scale_down_time = current_time
-                        return "scale_down", int(recommended)
-            
-            # Use prediction if it suggests scaling
-            elif predicted_replicas != current_replicas:
-                if predicted_replicas > current_replicas and current_time - last_scale_up_time >= 60:
-                    last_scale_up_time = current_time
-                    return "scale_up", int(predicted_replicas)
-                elif predicted_replicas < current_replicas and current_time - last_scale_down_time >= scale_down_delay:
-                    last_scale_down_time = current_time
-                    return "scale_down", int(predicted_replicas)
+                else:
+                    recommended = min(max_replicas_limit, current_replicas + 1)
+                if recommended > current_replicas:
+                    heapq.heappush(decision_heap, (3.0, "scale_up", recommended, f"high_cpu_{current_cpu:.1f}%"))
         
-        # Reactive fallback for extreme cases
+        # Priority 4: Very low activity emergency scale down
         if current_cpu < 5 and current_traffic < zero_traffic_threshold and current_replicas > min_replicas:
             if current_time - last_scale_down_time >= scale_down_delay:
-                logger.info(f"Very low activity detected (CPU: {current_cpu:.1f}%, Traffic: {current_traffic:.1f}), scaling to minimum")
-                last_scale_down_time = current_time
-                return "scale_down", min_replicas
+                heapq.heappush(decision_heap, (4.0, "scale_down", min_replicas, f"very_low_activity"))
+    
+    # Priority 5-10: MSE-based prediction decisions using model ranking
+    if predictions and len(predictions) > 0:
+        # Get all model predictions with their MSE rankings
+        model_predictions = get_ranked_model_predictions()
         
+        for rank, (mse, model_name, pred_value) in enumerate(model_predictions):
+            if pred_value is None:
+                continue
+                
+            predicted_replicas = int(round(pred_value))
+            priority = 5.0 + (rank * 0.1)  # Lower MSE models get higher priority
+            
+            # Scale up prediction
+            if predicted_replicas > current_replicas and current_time - last_scale_up_time >= 60:
+                if current_cpu > scale_down_threshold:  # Only if CPU supports scale up
+                    heapq.heappush(decision_heap, (priority, "scale_up", predicted_replicas, f"{model_name}_mse_{mse:.3f}"))
+            
+            # Scale down prediction  
+            elif predicted_replicas < current_replicas and current_replicas > cost_config.get('min_replicas', 1):
+                if current_time - last_scale_down_time >= cost_config.get('scale_down_delay_minutes', 2) * 60:
+                    if current_cpu < cost_config.get('scale_up_threshold', 80):  # Only if CPU supports scale down
+                        heapq.heappush(decision_heap, (priority + 1.0, "scale_down", predicted_replicas, f"{model_name}_mse_{mse:.3f}"))
+    
+    # Priority 11: Maintain current state (lowest priority)
+    heapq.heappush(decision_heap, (11.0, "maintain", current_replicas, "default_maintain"))
+    
+    # Select the highest priority decision (lowest priority score)
+    if decision_heap:
+        priority, decision, replicas, reason = heapq.heappop(decision_heap)
+        
+        # Update timing based on decision
+        if decision == "scale_up":
+            last_scale_up_time = current_time
+        elif decision == "scale_down":
+            last_scale_down_time = current_time
+        
+        logger.info(f"🎯 MinHeap scaling decision: {decision} to {replicas} replicas (priority: {priority:.1f}, reason: {reason})")
+        
+        return decision, int(replicas)
+    
+    # Fallback
     return "maintain", int(current_replicas)
+
+def get_ranked_model_predictions():
+    """Get predictions from all models ranked by their MSE (best first)"""
+    model_predictions = []
+    
+    # Get current predictions from each model
+    try:
+        # GRU prediction
+        if gru_model is not None and is_model_trained:
+            gru_pred = predict_with_gru(1)
+            if gru_pred and len(gru_pred) > 0:
+                model_predictions.append((gru_mse, 'gru', gru_pred[0]))
+    except Exception as e:
+        logger.debug(f"Failed to get GRU prediction for ranking: {e}")
+    
+    try:
+        # Holt-Winters prediction
+        hw_pred = predict_with_holtwinters(1)
+        if hw_pred and len(hw_pred) > 0:
+            model_predictions.append((holt_winters_mse, 'holt_winters', hw_pred[0]))
+    except Exception as e:
+        logger.debug(f"Failed to get HW prediction for ranking: {e}")
+    
+    try:
+        # Ensemble prediction
+        ensemble_pred = predict_with_ensemble(1)
+        if ensemble_pred and len(ensemble_pred) > 0:
+            ensemble_mse = calculate_ensemble_mse()
+            model_predictions.append((ensemble_mse, 'ensemble', ensemble_pred[0]))
+    except Exception as e:
+        logger.debug(f"Failed to get ensemble prediction for ranking: {e}")
+    
+    # Sort by MSE (lower is better) and filter out infinite MSE
+    valid_predictions = [(mse, name, pred) for mse, name, pred in model_predictions if mse != float('inf')]
+    invalid_predictions = [(mse, name, pred) for mse, name, pred in model_predictions if mse == float('inf')]
+    
+    # Sort valid predictions by MSE, then add invalid ones at the end
+    valid_predictions.sort(key=lambda x: x[0])
+    
+    ranked_predictions = valid_predictions + invalid_predictions
+    
+    logger.debug(f"Ranked model predictions: {[(name, mse, pred) for mse, name, pred in ranked_predictions]}")
+    
+    return ranked_predictions
+
+def make_scaling_decision(predictions):
+    """Enhanced scaling decision using MinHeap system for MSE-based ranking"""
+    return make_scaling_decision_with_minheap(predictions)
 
 def compare_predictions_with_heap(gru_predictions, hw_predictions):
     """Compare predictions from GRU and Holt-Winters models using a min heap."""
@@ -2272,23 +2367,31 @@ def get_prediction():
     except Exception as e:
         logger.error(f"Holt-Winters prediction failed: {e}")
     
-    # Select the best model for the actual scaling decision
+    # Select the best model using MinHeap system for the actual scaling decision
     best_model = select_best_model()
     
-    # Use the best model's predictions for scaling
-    if best_model == 'gru' and gru_predictions is not None:
+    # Get ranked predictions for MinHeap-based decision making
+    ranked_predictions = get_ranked_model_predictions()
+    
+    # Use the best model's predictions for scaling (lowest MSE first)
+    if ranked_predictions:
+        best_mse, best_method_name, best_prediction = ranked_predictions[0]
+        predictions = [best_prediction]
+        method = best_method_name.upper()
+        logger.info(f"🏆 MinHeap selected {method} for scaling: {predictions} (MSE: {best_mse:.4f})")
+    elif best_model == 'gru' and gru_predictions is not None:
         predictions = gru_predictions
         method = "GRU"
-        logger.info(f"Using GRU predictions for scaling: {predictions}")
+        logger.info(f"Fallback to GRU predictions for scaling: {predictions}")
     elif hw_predictions is not None:
         predictions = hw_predictions
         method = "Holt-Winters"
-        logger.info(f"Using Holt-Winters predictions for scaling: {predictions}")
+        logger.info(f"Fallback to Holt-Winters predictions for scaling: {predictions}")
     else:
-        # Fallback
+        # Ultimate fallback
         predictions = [2]  # Safe default
         method = "Fallback"
-        logger.warning("No predictions available, using fallback")
+        logger.warning("No predictions available, using ultimate fallback")
     
     decision, replicas = make_scaling_decision(predictions)
     scaling_decisions.labels(decision=decision).inc()
@@ -3138,7 +3241,67 @@ def predict_enhanced():
             'error': str(e)
         }), 500
 
+@app.route('/debug/minheap_status', methods=['GET'])
+def debug_minheap_status():
+    """Debug endpoint to inspect MinHeap model selection and decision making"""
+    try:
+        # Get current model rankings
+        ranked_predictions = get_ranked_model_predictions()
+        
+        # Test MinHeap model selection
+        selected_model = select_best_model_with_minheap()
+        
+        # Create a test scaling decision
+        test_predictions = [ranked_predictions[0][2]] if ranked_predictions else [2]
+        test_decision, test_replicas = make_scaling_decision_with_minheap(test_predictions)
+        
+        result = {
+            'timestamp': datetime.now().isoformat(),
+            'minheap_model_selection': {
+                'selected_model': selected_model,
+                'ranked_predictions': [
+                    {
+                        'model': name,
+                        'mse': mse if mse != float('inf') else None,
+                        'prediction': pred,
+                        'rank': i + 1
+                    }
+                    for i, (mse, name, pred) in enumerate(ranked_predictions)
+                ],
+                'selection_algorithm': 'MinHeap (lowest MSE first)'
+            },
+            'minheap_scaling_decision': {
+                'decision': test_decision,
+                'recommended_replicas': test_replicas,
+                'input_predictions': test_predictions,
+                'algorithm': 'Priority-based MinHeap'
+            },
+            'current_mse_values': {
+                'gru_mse': gru_mse if gru_mse != float('inf') else None,
+                'holt_winters_mse': holt_winters_mse if holt_winters_mse != float('inf') else None,
+                'ensemble_mse': calculate_ensemble_mse() if calculate_ensemble_mse() != float('inf') else None
+            },
+            'model_readiness': {
+                'gru_ready': is_model_trained and gru_model is not None,
+                'holt_winters_ready': True,
+                'ensemble_ready': 'ensemble' in predictions_history and len(predictions_history['ensemble']) > 0
+            },
+            'current_metrics': traffic_data[-1] if traffic_data else None,
+            'config': {
+                'mse_enabled': config['mse_config']['enabled'],
+                'mse_threshold_difference': config['mse_config']['mse_threshold_difference'],
+                'min_samples_for_mse': config['mse_config']['min_samples_for_mse']
+            }
+        }
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e), 'details': str(e)}), 500
+
 if __name__ == '__main__':
     # Initialize directly when run as a script
+    logger.info("🚀 Starting predictive autoscaler with MinHeap-based MSE model selection...")
+    logger.info("🎯 MinHeap system: Model selection based on lowest MSE priority")
     initialize()
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
