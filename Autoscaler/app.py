@@ -71,10 +71,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global variables - Keep original hyperparameters
-DATA_FILE = "traffic_data.csv"
-MODEL_FILE = "gru_model.h5"
-CONFIG_FILE = "config.json"
-PREDICTIONS_FILE = "predictions_history.json"
+DATA_DIR = "/data"
+DATA_FILE = os.path.join(DATA_DIR, "traffic_data.csv")
+MODEL_FILE = os.path.join(DATA_DIR, "gru_model.h5")
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+PREDICTIONS_FILE = os.path.join(DATA_DIR, "predictions_history.json")
+STATUS_FILE = os.path.join(DATA_DIR, "collection_status.json")
+SCALER_X_FILE = os.path.join(DATA_DIR, "scaler_X.pkl")
+SCALER_Y_FILE = os.path.join(DATA_DIR, "scaler_y.pkl")
 MIN_DATA_POINTS_FOR_GRU = 2000  # Based on your hyperparameters
 PREDICTION_WINDOW = 24  # Based on your hyperparameters
 SCALING_THRESHOLD = 0.7  # CPU threshold for scaling decision
@@ -143,6 +147,8 @@ last_scale_down_time = 0
 traffic_data = []
 is_collecting = False
 collection_thread = None
+data_collection_complete = False  # Flag to track if initial 24-hour data collection is complete
+data_collection_start_time = None  # Track when data collection started
 gru_model = None
 scaler_X = MinMaxScaler()
 scaler_y = MinMaxScaler()
@@ -210,9 +216,34 @@ def save_data():
     try:
         df = pd.DataFrame(traffic_data)
         df.to_csv(DATA_FILE, index=False)
+        save_collection_status()  # Also save collection status when saving data
         logger.info(f"Saved {len(traffic_data)} data points to {DATA_FILE}")
     except Exception as e:
         logger.error(f"Error saving data: {e}")
+
+def filter_stale_data(max_age_hours=24):
+    """Filter out data points older than a specified age."""
+    global traffic_data
+    if not traffic_data:
+        return
+
+    try:
+        cutoff_time = datetime.now() - timedelta(hours=max_age_hours)
+        original_count = len(traffic_data)
+        
+        # Ensure timestamp is a string before parsing
+        traffic_data = [
+            d for d in traffic_data 
+            if 'timestamp' in d and isinstance(d['timestamp'], str) and 
+               datetime.strptime(d['timestamp'], "%Y-%m-%d %H:%M:%S") > cutoff_time
+        ]
+        
+        removed_count = original_count - len(traffic_data)
+        if removed_count > 0:
+            logger.info(f"Removed {removed_count} stale data points older than {max_age_hours} hours.")
+    except (ValueError, TypeError) as e:
+        logger.error(f"Error parsing timestamps during stale data filtering: {e}. Data may be corrupt.")
+
 
 def load_predictions_history():
     """Load predictions history for MSE calculation"""
@@ -233,6 +264,37 @@ def save_predictions_history():
             json.dump(predictions_history, f, indent=2)
     except Exception as e:
         logger.error(f"Error saving predictions history: {e}")
+
+def load_collection_status():
+    """Load data collection status from file"""
+    global data_collection_complete, data_collection_start_time
+    try:
+        if os.path.exists(STATUS_FILE):
+            with open(STATUS_FILE, 'r') as f:
+                status = json.load(f)
+                data_collection_complete = status.get('collection_complete', False)
+                start_time_str = status.get('collection_start_time')
+                if start_time_str:
+                    data_collection_start_time = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M:%S")
+                logger.info(f"Loaded collection status: complete={data_collection_complete}, start_time={data_collection_start_time}")
+    except Exception as e:
+        logger.error(f"Error loading collection status: {e}")
+        data_collection_complete = False
+        data_collection_start_time = None
+
+def save_collection_status():
+    """Save data collection status to file"""
+    try:
+        status = {
+            'collection_complete': data_collection_complete,
+            'collection_start_time': data_collection_start_time.strftime("%Y-%m-%d %H:%M:%S") if data_collection_start_time else None,
+            'last_updated': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        with open(STATUS_FILE, 'w') as f:
+            json.dump(status, f, indent=2)
+        logger.info(f"Saved collection status: complete={data_collection_complete}")
+    except Exception as e:
+        logger.error(f"Error saving collection status: {e}")
 
 def create_advanced_features(data):
     """Create advanced features for better prediction accuracy."""
@@ -1022,8 +1084,26 @@ def load_model_components():
         return False
 
 def collect_metrics_from_prometheus():
-    """Collect real metrics from Prometheus"""
+    """Collect real metrics from Prometheus with 24-hour collection limit"""
     global traffic_data, is_collecting, last_training_time, low_traffic_start_time, consecutive_low_cpu_count
+    global data_collection_complete, data_collection_start_time
+    
+    # Check if data collection is already complete
+    if data_collection_complete:
+        logger.info("Data collection already complete. Using stored 24-hour dataset for predictions.")
+        is_collecting = False
+        return
+    
+    # Set collection start time if not already set
+    if data_collection_start_time is None:
+        data_collection_start_time = datetime.now()
+        save_collection_status()
+        logger.info(f"📅 Started 24-hour data collection period at {data_collection_start_time}")
+        logger.info("🎓 AWS Academy Compatible: Collection based on calendar time, survives system restarts")
+    else:
+        elapsed_hours = (datetime.now() - data_collection_start_time).total_seconds() / 3600
+        remaining_hours = max(0, 24 - elapsed_hours)
+        logger.info(f"📅 Continuing data collection: {elapsed_hours:.1f}h elapsed, {remaining_hours:.1f}h remaining")
     
     while is_collecting:
         try:
@@ -1127,7 +1207,7 @@ def collect_metrics_from_prometheus():
                         else:
                             logger.error("❌ GRU prediction failed!")
                     else:
-                        logger.warning(f"❌ GRU not available: model={gru_model is not None}, trained={is_model_trained}")
+                        logger.info(f"❌ GRU not available: model={gru_model is not None}, trained={is_model_trained}")
                         
                 except Exception as e:
                     logger.error(f"❌ Background prediction generation failed: {e}")
@@ -1174,7 +1254,7 @@ def collect_metrics_from_prometheus():
                     else:
                         logger.debug(f"Waiting for more data: {len(traffic_data)} < {min_data_required}")
                 else:
-                    logger.debug(f"Waiting for time threshold: {minutes_elapsed:.1f} < {config['training_threshold_minutes']} minutes")
+                    logger.log(f"Waiting for time threshold: {minutes_elapsed:.1f} < {config['training_threshold_minutes']} minutes")
             
             # Retrain conditions
             elif is_model_trained and current_cpu >= config['cpu_threshold']:
@@ -1225,6 +1305,21 @@ def collect_metrics_from_prometheus():
                     logger.error(f"❌ Exception during GRU training: {e}")
                     import traceback
                     logger.error(f"Stack trace: {traceback.format_exc()}")
+            
+            # Check if 24 hours of actual runtime has accumulated
+            if data_collection_start_time:
+                # Calculate total runtime across all sessions by counting data points
+                # Each data point represents ~1 minute of runtime (collection_interval = 60s)
+                runtime_hours = len(traffic_data) / 60  # Approximate runtime hours based on data points
+                
+                if runtime_hours >= 24:  # 24 hours of actual runtime
+                    data_collection_complete = True
+                    is_collecting = False
+                    save_collection_status()
+                    save_data()  # Save the final dataset
+                    logger.info(f"✅ 24-hour runtime completed! Collected {len(traffic_data)} data points across multiple AWS Academy sessions.")
+                    logger.info("🔒 Data collection stopped. System will now use this dataset for all predictions.")
+                    break
             
             # Sleep for the collection interval
             time.sleep(config['collection_interval'])
@@ -1358,8 +1453,10 @@ def build_gru_model():
         logger.info("Model compiled, starting training...")
         
         # Train model with validation
-        batch_size = min(int(gru_config["batch_size"]), len(X) // 4)
-        epochs = min(int(gru_config["epochs"]), 50)  # Limit epochs to prevent overfitting
+        batch_size = min(int(gru_config["batch_size"]),
+                         len(X) // 4)
+        epochs = min(int(gru_config["epochs"]),
+                     50)  # Limit epochs to prevent overfitting
         
         history = model.fit(
             X, y,
@@ -2218,7 +2315,11 @@ def compare_predictions_with_heap(gru_predictions, hw_predictions):
 
 def start_collection():
     """Start the metrics collection thread."""
-    global is_collecting, collection_thread
+    global is_collecting, collection_thread, data_collection_complete
+    
+    if data_collection_complete:
+        logger.info("Data collection already complete. Using stored 24-hour dataset.")
+        return False
     
     if not is_collecting:
         is_collecting = True
@@ -2289,6 +2390,27 @@ def status():
         'model_loaded_in_memory': gru_model is not None
     }
     
+    # Data collection status - runtime based for AWS Academy compatibility
+    collection_status = {
+        'collection_complete': data_collection_complete,
+        'collection_start_time': data_collection_start_time.isoformat() if data_collection_start_time else None,
+        'is_collecting': is_collecting,
+        'runtime_hours_collected': len(traffic_data) / 60,  # Each data point ≈ 1 minute
+        'remaining_runtime_hours': max(0, 24 - (len(traffic_data) / 60)),
+        'progress_percentage': min(100, (len(traffic_data) / 1440) * 100),  # 1440 = 24hrs * 60min
+        'data_points_collected': len(traffic_data),
+        'target_data_points': 1440,  # 24 hours * 60 minutes
+        'sessions_info': {
+            'aws_academy_sessions_needed': 6,
+            'hours_per_session': 4,
+            'estimated_sessions_completed': min(6, int((len(traffic_data) / 60) / 4))
+        },
+        'note': 'Collection based on 24 hours of actual runtime, perfect for AWS Academy 4-hour sessions'
+    }
+    
+    if not data_collection_complete and len(traffic_data) > 0:
+        collection_status['current_session_runtime'] = (datetime.now() - start_time).total_seconds() / 3600
+
     return jsonify({
         'data_points': len(traffic_data),
         'model_trained': is_model_trained,
@@ -2302,6 +2424,7 @@ def status():
         'current_cpu': current_cpu,
         'current_traffic': traffic_data[-1]['traffic'] if traffic_data else 0,
         'current_replicas': traffic_data[-1]['replicas'] if traffic_data else 1,
+        'data_collection_status': collection_status,
         'gru_debug': {
             'training_ready': training_ready,
             'model_files': model_files,
@@ -2658,6 +2781,7 @@ def initialize():
     load_config()
     load_data()
     load_predictions_history()
+    load_collection_status()  # Load data collection status
     
     # Load model components with status reporting
     model_loaded = load_model_components()
@@ -2673,7 +2797,7 @@ def initialize():
     prediction_mse.labels(model="gru").observe(0.0)
     prediction_mse.labels(model="holtwinters").observe(0.0)
     current_mse.labels(model="gru").set(-1.0)  # Start with -1 (insufficient data)
-    current_mse.labels(model="holtwinters").set(-1.0)
+    current_mse.labels(model="holt_winters").set(-1.0)
     training_time.labels(model="gru").set(0.0)
     training_time.labels(model="holtwinters").set(0.0)
     prediction_time.labels(model="gru").set(0.0)
@@ -3060,7 +3184,7 @@ def debug_enhanced_mse():
             'models': {}
         }
         
-        for model_name in ['gru', 'holt_winters', 'ensemble']:
+        for model_name in ['gru', 'holt_winters']:
             if model_name in predictions_history:
                 enhanced_metrics = calculate_enhanced_mse(model_name)
                 result['models'][model_name] = enhanced_metrics
@@ -3299,9 +3423,93 @@ def debug_minheap_status():
     except Exception as e:
         return jsonify({'error': str(e), 'details': str(e)}), 500
 
+@app.route('/reset_data', methods=['POST'])
+def reset_data():
+    """Reset all collected data and restart data collection from scratch."""
+    global traffic_data, data_collection_complete, data_collection_start_time
+    global predictions_history, gru_model, is_model_trained, scaler_X, scaler_y
+    global is_collecting, collection_thread
+    
+    try:
+        # Stop current collection if running
+        if is_collecting:
+            stop_collection()
+            time.sleep(2)  # Wait for collection to stop
+        
+        # Clear all data
+        traffic_data = []
+        predictions_history = {'gru': [], 'holt_winters': [], 'ensemble': []}
+        
+        # Reset collection status
+        data_collection_complete = False
+        data_collection_start_time = None
+        
+        # Reset model components
+        gru_model = None
+        is_model_trained = False
+        scaler_X = MinMaxScaler()
+        scaler_y = MinMaxScaler()
+        
+        # Clear config flags
+        config['use_gru'] = False
+        save_config()
+        
+        # Delete data files
+        files_to_delete = [DATA_FILE, STATUS_FILE, PREDICTIONS_FILE, MODEL_FILE, SCALER_X_FILE, SCALER_Y_FILE]
+        deleted_files = []
+        for file_path in files_to_delete:
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    deleted_files.append(os.path.basename(file_path))
+            except Exception as e:
+                logger.warning(f"Could not delete {file_path}: {e}")
+        
+        # Save the reset status
+        save_collection_status()
+        save_data()
+        save_predictions_history()
+        
+        # Start fresh data collection
+        start_collection()
+        
+        logger.info("🔄 Data reset completed. Starting fresh 24-hour data collection.")
+        
+        return jsonify({
+            "status": "success",
+            "message": "All data cleared and fresh collection started",
+            "details": {
+                "deleted_files": deleted_files,
+                "collection_restarted": True,
+                "estimated_completion": (datetime.now() + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Error during data reset: {e}")
+        return jsonify({
+            "status": "error", 
+            "message": f"Data reset failed: {str(e)}"
+        }), 500
+
 if __name__ == '__main__':
     # Initialize directly when run as a script
     logger.info("🚀 Starting predictive autoscaler with MinHeap-based MSE model selection...")
     logger.info("🎯 MinHeap system: Model selection based on lowest MSE priority")
+    load_data()
+    filter_stale_data()
     initialize()
+    
+    # Start data collection automatically if not complete
+    if not data_collection_complete:
+        runtime_hours = len(traffic_data) / 60
+        sessions_completed = int(runtime_hours / 4)
+        logger.info(f"🎓 AWS Academy Mode: Starting data collection...")
+        logger.info(f"📊 Progress: {runtime_hours:.1f}/24 hours ({len(traffic_data)}/1440 data points)")
+        logger.info(f"📈 Sessions: {sessions_completed}/6 completed (~4 hours each)")
+        start_collection()
+    else:
+        logger.info(f"✅ Using stored 24-hour dataset with {len(traffic_data)} data points")
+        logger.info("🎓 AWS Academy: All 6 sessions completed, ready for production use!")
+    
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
