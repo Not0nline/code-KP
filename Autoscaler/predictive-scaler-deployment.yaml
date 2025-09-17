@@ -30,13 +30,15 @@ spec:
           value: "product-app-combined" # Deployment to get metrics from
         - name: TARGET_APP_LABEL
           value: "product-app-combined" # Label used by product-app-combined pods
+        - name: PROMETHEUS_URL
+          value: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
         resources: # Add appropriate resources for the scaler
           requests:
             cpu: "100m"
-            memory: "256Mi"
+            memory: "512Mi"
           limits:
             cpu: "500m"
-            memory: "512Mi"
+            memory: "1Gi"
         readinessProbe: # Add probes
           httpGet:
             path: /health

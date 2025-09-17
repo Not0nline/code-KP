@@ -1,4 +1,4 @@
-
+==== Implemented in code ====
 kubectl patch svc predictive-scaler -p '{"metadata":{"labels":{"app":"predictive-scaler"}},"spec":{"ports":[{"name":"http","port":5000,"targetPort":5000,"protocol":"TCP"}]}}'
 
 kubectl patch deployment predictive-scaler --type='json' -p='[
@@ -28,3 +28,5 @@ kubectl get deployment predictive-scaler -o jsonpath='{.spec.template.spec.conta
 # If it has a PROMETHEUS_URL or similar, update it
 kubectl set env deployment/predictive-scaler PROMETHEUS_URL=http://prometheus-operated.monitoring.svc.cluster.local:9090
 
+
+==== Not Implemented yet ====
