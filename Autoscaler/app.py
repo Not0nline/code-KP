@@ -1002,31 +1002,31 @@ def load_model_components():
         
         # Load scalers with validation
         scalers_loaded = 0
-        if os.path.exists('scaler_X.pkl'):
+        if os.path.exists(SCALER_X_FILE):
             try:
-                scaler_X = joblib.load('scaler_X.pkl')
-                logger.info("Feature scaler loaded successfully")
+                scaler_X = joblib.load(SCALER_X_FILE)
+                logger.info(f"Feature scaler loaded successfully from {SCALER_X_FILE}")
                 scalers_loaded += 1
             except Exception as e:
                 logger.error(f"Failed to load feature scaler: {e}")
                 gru_model = None
                 return False
         else:
-            logger.warning("Feature scaler file not found")
+            logger.warning(f"Feature scaler file not found: {SCALER_X_FILE}")
             gru_model = None
             return False
         
-        if os.path.exists('scaler_y.pkl'):
+        if os.path.exists(SCALER_Y_FILE):
             try:
-                scaler_y = joblib.load('scaler_y.pkl')
-                logger.info("Target scaler loaded successfully")
+                scaler_y = joblib.load(SCALER_Y_FILE)
+                logger.info(f"Target scaler loaded successfully from {SCALER_Y_FILE}")
                 scalers_loaded += 1
             except Exception as e:
                 logger.error(f"Failed to load target scaler: {e}")
                 gru_model = None
                 return False
         else:
-            logger.warning("Target scaler file not found")
+            logger.warning(f"Target scaler file not found: {SCALER_Y_FILE}")
             gru_model = None
             return False
         
@@ -1488,9 +1488,9 @@ def build_gru_model():
         # Save model and scalers
         try:
             model.save(MODEL_FILE)
-            joblib.dump(scaler_X, 'scaler_X.pkl')
-            joblib.dump(scaler_y, 'scaler_y.pkl')
-            logger.info("Model and scalers saved successfully")
+            joblib.dump(scaler_X, SCALER_X_FILE)
+            joblib.dump(scaler_y, SCALER_Y_FILE)
+            logger.info(f"Model and scalers saved successfully to {MODEL_FILE}, {SCALER_X_FILE}, {SCALER_Y_FILE}")
         except Exception as e:
             logger.error(f"Failed to save model: {e}")
             elapsed_ms = (time.time() - start_time) * 1000
@@ -1650,9 +1650,9 @@ def build_advanced_gru_model():
         # Save model
         try:
             model.save(MODEL_FILE)
-            joblib.dump(scaler_X, 'scaler_X.pkl')
-            joblib.dump(scaler_y, 'scaler_y.pkl')
-            logger.info("Advanced model and scalers saved")
+            joblib.dump(scaler_X, SCALER_X_FILE)
+            joblib.dump(scaler_y, SCALER_Y_FILE)
+            logger.info(f"Advanced model and scalers saved to {MODEL_FILE}, {SCALER_X_FILE}, {SCALER_Y_FILE}")
         except Exception as e:
             logger.error(f"Failed to save advanced model: {e}")
             return False
@@ -2385,8 +2385,8 @@ def status():
     # Model file status
     model_files = {
         'gru_model_exists': os.path.exists(MODEL_FILE),
-        'scaler_x_exists': os.path.exists('scaler_X.pkl'),
-        'scaler_y_exists': os.path.exists('scaler_y.pkl'),
+        'scaler_x_exists': os.path.exists(SCALER_X_FILE),
+        'scaler_y_exists': os.path.exists(SCALER_Y_FILE),
         'model_loaded_in_memory': gru_model is not None
     }
     
@@ -3422,6 +3422,50 @@ def debug_minheap_status():
         
     except Exception as e:
         return jsonify({'error': str(e), 'details': str(e)}), 500
+
+@app.route('/force_reload_model', methods=['POST'])
+def force_reload_model():
+    """Force reload GRU model and scalers from disk."""
+    global gru_model, scaler_X, scaler_y, is_model_trained
+    
+    try:
+        # Reset model components
+        gru_model = None
+        is_model_trained = False
+        scaler_X = MinMaxScaler()
+        scaler_y = MinMaxScaler()
+        
+        # Try to reload from disk
+        success = load_model_components()
+        
+        if success:
+            logger.info("✅ Model components reloaded successfully!")
+            return jsonify({
+                "status": "success",
+                "message": "Model and scalers reloaded successfully",
+                "details": {
+                    "model_loaded": gru_model is not None,
+                    "model_trained": is_model_trained,
+                    "files_found": {
+                        "gru_model": os.path.exists(MODEL_FILE),
+                        "scaler_x": os.path.exists(SCALER_X_FILE),
+                        "scaler_y": os.path.exists(SCALER_Y_FILE)
+                    }
+                }
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Failed to reload model components",
+                "suggestion": "Check if model files exist and are valid"
+            }), 400
+            
+    except Exception as e:
+        logger.error(f"Error during model reload: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Model reload failed: {str(e)}"
+        }), 500
 
 @app.route('/reset_data', methods=['POST'])
 def reset_data():

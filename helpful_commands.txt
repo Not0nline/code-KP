@@ -33,3 +33,11 @@ curl -X GET http://localhost:5000/debug/model_comparison | jq
 
 # Use enhanced prediction
 curl -X GET http://localhost:5000/predict_enhanced?ensemble=auto | jq
+
+
+=== For reseting data ===
+kubectl port-forward service/predictive-scaler 8080:5000
+
+curl -X POST http://localhost:8080/reset_data
+
+curl http://localhost:8080/status
