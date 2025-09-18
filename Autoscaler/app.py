@@ -83,6 +83,7 @@ MIN_DATA_POINTS_FOR_GRU = 2000  # Based on your hyperparameters
 PREDICTION_WINDOW = 24  # Based on your hyperparameters
 SCALING_THRESHOLD = 0.7  # CPU threshold for scaling decision
 SCALING_COOLDOWN = 60  # Reduced to 1 minute for faster scale down
+COLLECTION_HOURS = 4  # Hours of data to collect before switching to MSE-only mode (reduced for testing)
 
 # Default configuration with your original hyperparameters
 config = {
@@ -145,6 +146,7 @@ last_scaling_time = 0
 last_scale_up_time = 0
 last_scale_down_time = 0
 traffic_data = []
+training_dataset = []  # Permanent 24-hour dataset for model training
 is_collecting = False
 collection_thread = None
 data_collection_complete = False  # Flag to track if initial 24-hour data collection is complete
@@ -202,22 +204,41 @@ def save_config():
         logger.error(f"Error saving configuration: {e}")
 
 def load_data():
-    global traffic_data
+    global traffic_data, training_dataset
     try:
+        # Load current traffic data
         if os.path.exists(DATA_FILE):
             df = pd.read_csv(DATA_FILE)
             traffic_data = df.to_dict('records')
-            logger.info(f"Loaded {len(traffic_data)} data points from {DATA_FILE}")
+            logger.info(f"Loaded {len(traffic_data)} current data points from {DATA_FILE}")
+        
+        # Load training dataset if it exists and collection is complete
+        training_file = DATA_FILE.replace('.csv', '_training.csv')
+        if os.path.exists(training_file) and data_collection_complete:
+            training_df = pd.read_csv(training_file)
+            training_dataset = training_df.to_dict('records')
+            logger.info(f"Loaded {len(training_dataset)} training data points from {training_file}")
+        
     except Exception as e:
         logger.error(f"Error loading data: {e}")
         traffic_data = []
+        training_dataset = []
 
 def save_data():
     try:
+        # Save current traffic data
         df = pd.DataFrame(traffic_data)
         df.to_csv(DATA_FILE, index=False)
+        
+        # Save training dataset separately if it exists
+        if training_dataset:
+            training_file = DATA_FILE.replace('.csv', '_training.csv')
+            training_df = pd.DataFrame(training_dataset)
+            training_df.to_csv(training_file, index=False)
+            logger.info(f"Saved {len(training_dataset)} training data points to {training_file}")
+        
         save_collection_status()  # Also save collection status when saving data
-        logger.info(f"Saved {len(traffic_data)} data points to {DATA_FILE}")
+        logger.info(f"Saved {len(traffic_data)} current data points to {DATA_FILE}")
     except Exception as e:
         logger.error(f"Error saving data: {e}")
 
@@ -1083,15 +1104,77 @@ def load_model_components():
         is_model_trained = False
         return False
 
+def collect_mse_data_only():
+    """Lightweight data collection only for MSE calculation after 24-hour training dataset is complete"""
+    global is_collecting, predictions_history, last_mse_calculation
+    
+    logger.info("🎯 MSE-only mode: Collecting minimal data for prediction accuracy measurement")
+    
+    while is_collecting:
+        try:
+            if prometheus_client is None:
+                initialize_prometheus()
+                
+            # Get only essential metrics for MSE calculation
+            cpu_query = f'avg(rate(container_cpu_usage_seconds_total{{pod=~"{config["target_deployment"]}-.*"}}[5m])) * 100'
+            cpu_result = prometheus_client.custom_query(cpu_query)
+            current_cpu = float(cpu_result[0]['value'][1]) if cpu_result and len(cpu_result) > 0 else 0
+            
+            replicas_query = f'kube_deployment_status_replicas{{deployment="{config["target_deployment"]}", namespace="{config["target_namespace"]}"}}'
+            replicas_result = prometheus_client.custom_query(replicas_query)
+            current_replicas = int(float(replicas_result[0]['value'][1])) if replicas_result else 1
+            
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Only match predictions with current data - don't store training data
+            try:
+                match_new_data_with_predictions(current_replicas, current_cpu, timestamp)
+            except Exception as e:
+                logger.debug(f"MSE matching failed: {e}")
+            
+            # Generate fresh predictions for MSE tracking (using stored training dataset)
+            if len(traffic_data) >= 12:  # Use stored training data
+                try:
+                    # Generate GRU prediction
+                    if gru_model is not None and is_model_trained:
+                        gru_pred = predict_with_advanced_gru(1)
+                        if not gru_pred:
+                            gru_pred = predict_with_gru(1)
+                        if gru_pred:
+                            logger.debug(f"MSE Mode - GRU prediction: {gru_pred}")
+                    
+                    # Generate Holt-Winters prediction  
+                    hw_pred = predict_with_optimized_holtwinters(1)
+                    if not hw_pred:
+                        hw_pred = predict_with_holtwinters(1)
+                    if hw_pred:
+                        logger.debug(f"MSE Mode - HW prediction: {hw_pred}")
+                        
+                except Exception as e:
+                    logger.error(f"MSE mode prediction generation failed: {e}")
+            
+            # Update MSE calculations
+            current_time = datetime.now()
+            if last_mse_calculation is None or (current_time - last_mse_calculation).total_seconds() > 30:
+                update_mse_metrics()
+                last_mse_calculation = current_time
+            
+            # Sleep longer in MSE mode (less frequent collection needed)
+            time.sleep(config['collection_interval'] * 2)  # 2x normal interval
+            
+        except Exception as e:
+            logger.error(f"Error in MSE collection mode: {e}")
+            time.sleep(10)
+
 def collect_metrics_from_prometheus():
-    """Collect real metrics from Prometheus with 24-hour collection limit"""
+    """Collect real metrics from Prometheus with 24-hour collection limit and MSE mode"""
     global traffic_data, is_collecting, last_training_time, low_traffic_start_time, consecutive_low_cpu_count
     global data_collection_complete, data_collection_start_time
     
-    # Check if data collection is already complete
+    # If 24-hour collection is complete, switch to MSE-only mode
     if data_collection_complete:
-        logger.info("Data collection already complete. Using stored 24-hour dataset for predictions.")
-        is_collecting = False
+        logger.info("24-hour training dataset complete. Switching to MSE-only data collection mode.")
+        collect_mse_data_only()
         return
     
     # Set collection start time if not already set
@@ -1306,19 +1389,27 @@ def collect_metrics_from_prometheus():
                     import traceback
                     logger.error(f"Stack trace: {traceback.format_exc()}")
             
-            # Check if 24 hours of actual runtime has accumulated
+            # Check if 4 hours of actual runtime has accumulated (reduced for testing)
             if data_collection_start_time:
                 # Calculate total runtime across all sessions by counting data points
                 # Each data point represents ~1 minute of runtime (collection_interval = 60s)
                 runtime_hours = len(traffic_data) / 60  # Approximate runtime hours based on data points
                 
-                if runtime_hours >= 24:  # 24 hours of actual runtime
+                if runtime_hours >= COLLECTION_HOURS:  # Configurable collection period
                     data_collection_complete = True
-                    is_collecting = False
+                    
+                    # Save the 24-hour dataset as permanent training data
+                    global training_dataset
+                    training_dataset = traffic_data.copy()  # Preserve the complete 24-hour dataset
+                    
                     save_collection_status()
                     save_data()  # Save the final dataset
-                    logger.info(f"✅ 24-hour runtime completed! Collected {len(traffic_data)} data points across multiple AWS Academy sessions.")
-                    logger.info("🔒 Data collection stopped. System will now use this dataset for all predictions.")
+                    logger.info(f"✅ 4-hour runtime completed! Collected {len(traffic_data)} data points for testing.")
+                    logger.info(f"� Training dataset locked: {len(training_dataset)} data points saved permanently")
+                    logger.info("🔄 Switching to MSE-only mode for prediction accuracy measurement")
+                    
+                    # Clear current traffic_data to start fresh for MSE tracking
+                    traffic_data = []
                     break
             
             # Sleep for the collection interval
@@ -1693,12 +1784,15 @@ def predict_with_holtwinters(steps=None):
         steps = int(hw_config["look_forward"])
     
     try:
-        if len(traffic_data) < 12: # Need enough data for seasonal period
-            logger.info("Not enough data for Holt-Winters prediction")
+        # Use training dataset if collection is complete, otherwise use current data
+        prediction_data = training_dataset if data_collection_complete and training_dataset else traffic_data
+        
+        if len(prediction_data) < 12: # Need enough data for seasonal period
+            logger.info(f"Not enough data for Holt-Winters prediction: {len(prediction_data)} < 12")
             return None
         
         # Use replicas history
-        replicas = [d['replicas'] for d in traffic_data[-60:]] # Use up to 5 mins of data
+        replicas = [d['replicas'] for d in prediction_data[-60:]] # Use up to 5 mins of data
         
         # Fit Holt-Winters with original hyperparameters
         model = ExponentialSmoothing(
@@ -1753,16 +1847,19 @@ def predict_with_gru(steps=None):
             logger.error(f"🚨 GRU PREDICTION BLOCKED: model={gru_model is not None}, trained={is_model_trained}")
             return None
         
-        logger.info(f"🔄 GRU prediction starting: model_loaded={gru_model is not None}, data_points={len(traffic_data)}")    
+        # Use training dataset if collection is complete, otherwise use current data
+        prediction_data = training_dataset if data_collection_complete and training_dataset else traffic_data
+        
+        logger.info(f"🔄 GRU prediction starting: model_loaded={gru_model is not None}, data_points={len(prediction_data)}, using_training_data={data_collection_complete}")    
         look_back = int(gru_config["look_back"])
     
-    if len(traffic_data) < look_back:
-        logger.warning(f"Not enough data for GRU prediction: {len(traffic_data)} < {look_back}")
+    if len(prediction_data) < look_back:
+        logger.warning(f"Not enough data for GRU prediction: {len(prediction_data)} < {look_back}")
         return None
     
     try:
         # Prepare recent data with validation
-        recent_data = traffic_data[-look_back:]
+        recent_data = prediction_data[-look_back:]
         df = pd.DataFrame(recent_data)
         
         # Ensure required columns exist
@@ -2396,16 +2493,16 @@ def status():
         'collection_start_time': data_collection_start_time.isoformat() if data_collection_start_time else None,
         'is_collecting': is_collecting,
         'runtime_hours_collected': len(traffic_data) / 60,  # Each data point ≈ 1 minute
-        'remaining_runtime_hours': max(0, 24 - (len(traffic_data) / 60)),
-        'progress_percentage': min(100, (len(traffic_data) / 1440) * 100),  # 1440 = 24hrs * 60min
+        'remaining_runtime_hours': max(0, 4 - (len(traffic_data) / 60)),
+        'progress_percentage': min(100, (len(traffic_data) / 240) * 100),  # 240 = 4hrs * 60min
         'data_points_collected': len(traffic_data),
-        'target_data_points': 1440,  # 24 hours * 60 minutes
+        'target_data_points': 240,  # 4 hours * 60 minutes
         'sessions_info': {
-            'aws_academy_sessions_needed': 6,
+            'aws_academy_sessions_needed': 1,
             'hours_per_session': 4,
-            'estimated_sessions_completed': min(6, int((len(traffic_data) / 60) / 4))
+            'estimated_sessions_completed': min(1, int((len(traffic_data) / 60) / 4))
         },
-        'note': 'Collection based on 24 hours of actual runtime, perfect for AWS Academy 4-hour sessions'
+        'note': 'Collection based on 4 hours of actual runtime for testing purposes'
     }
     
     if not data_collection_complete and len(traffic_data) > 0:
@@ -3423,6 +3520,33 @@ def debug_minheap_status():
     except Exception as e:
         return jsonify({'error': str(e), 'details': str(e)}), 500
 
+@app.route('/debug/dataset_status', methods=['GET'])
+def debug_dataset_status():
+    """Debug endpoint to check dataset status and MSE issues."""
+    return jsonify({
+        'collection_status': {
+            'collection_complete': data_collection_complete,
+            'current_data_points': len(traffic_data),
+            'training_data_points': len(training_dataset),
+            'using_training_data': data_collection_complete and len(training_dataset) > 0
+        },
+        'mse_analysis': {
+            'gru_predictions_total': len(predictions_history.get('gru', [])),
+            'gru_predictions_matched': len([p for p in predictions_history.get('gru', []) if p.get('matched', False)]),
+            'hw_predictions_total': len(predictions_history.get('holt_winters', [])),
+            'hw_predictions_matched': len([p for p in predictions_history.get('holt_winters', []) if p.get('matched', False)]),
+            'current_mse_values': {
+                'gru': gru_mse if gru_mse != float('inf') else 'insufficient_data',
+                'holt_winters': holt_winters_mse if holt_winters_mse != float('inf') else 'insufficient_data'
+            }
+        },
+        'recent_predictions': {
+            'gru_recent': predictions_history.get('gru', [])[-3:] if predictions_history.get('gru') else [],
+            'hw_recent': predictions_history.get('holt_winters', [])[-3:] if predictions_history.get('holt_winters') else []
+        },
+        'suggestion': 'If MSE is poor, try /force_reload_model or check prediction-data mismatch'
+    })
+
 @app.route('/force_reload_model', methods=['POST'])
 def force_reload_model():
     """Force reload GRU model and scalers from disk."""
@@ -3548,12 +3672,12 @@ if __name__ == '__main__':
     if not data_collection_complete:
         runtime_hours = len(traffic_data) / 60
         sessions_completed = int(runtime_hours / 4)
-        logger.info(f"🎓 AWS Academy Mode: Starting data collection...")
-        logger.info(f"📊 Progress: {runtime_hours:.1f}/24 hours ({len(traffic_data)}/1440 data points)")
-        logger.info(f"📈 Sessions: {sessions_completed}/6 completed (~4 hours each)")
+        logger.info(f"🧪 Testing Mode: Starting 4-hour data collection...")
+        logger.info(f"📊 Progress: {runtime_hours:.1f}/4 hours ({len(traffic_data)}/240 data points)")
+        logger.info(f"📈 Sessions: {sessions_completed}/1 completed (4 hours total)")
         start_collection()
     else:
-        logger.info(f"✅ Using stored 24-hour dataset with {len(traffic_data)} data points")
-        logger.info("🎓 AWS Academy: All 6 sessions completed, ready for production use!")
+        logger.info(f"✅ Using stored 4-hour test dataset with {len(traffic_data)} data points")
+        logger.info("🧪 Testing: 4-hour collection completed, ready for testing!")
     
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
