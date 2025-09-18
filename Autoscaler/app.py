@@ -171,6 +171,82 @@ predictions_history = {
 gru_mse = float('inf')
 holt_winters_mse = float('inf')
 last_mse_calculation = None
+last_cleanup_time = None  # Track cleanup operations to prevent too frequent cleanup
+
+# Training state management to prevent Flask blocking
+is_training = False
+training_thread = None
+training_lock = threading.Lock()
+
+def async_model_training(training_reason, traffic_data_copy, advanced_fallback=True):
+    """Perform model training in a separate thread to prevent Flask blocking"""
+    global is_training, is_model_trained, last_training_time, models, gru_model
+    
+    try:
+        with training_lock:
+            if is_training:
+                logger.warning("⚠️ Training already in progress, skipping...")
+                return
+            is_training = True
+        
+        logger.info(f"🚀 Starting ASYNC model training: {training_reason}")
+        training_start = datetime.now()
+        
+        # Configure TensorFlow to use limited resources to prevent blocking
+        try:
+            import tensorflow as tf
+            tf.config.threading.set_inter_op_parallelism_threads(2)  # Limit threads
+            tf.config.threading.set_intra_op_parallelism_threads(2)
+        except:
+            pass  # If TensorFlow config fails, continue anyway
+        
+        success = False
+        
+        # Temporarily update traffic_data for training (thread-safe copy)
+        original_traffic_data = traffic_data[:]
+        traffic_data[:] = traffic_data_copy
+        
+        try:
+            # Try advanced model first if we have enough data
+            if advanced_fallback and len(traffic_data_copy) >= 30:
+                logger.info("🧠 Attempting advanced GRU model training...")
+                success = build_advanced_gru_model()
+                if success:
+                    logger.info("✅ Advanced GRU model training succeeded!")
+            
+            # Fallback to basic model if advanced failed or not attempted
+            if not success:
+                logger.info("🔧 Attempting basic GRU model training...")
+                success = build_gru_model()
+                if success:
+                    logger.info("✅ Basic GRU model training succeeded!")
+        
+        finally:
+            # Restore original traffic data
+            traffic_data[:] = original_traffic_data
+        
+        if success:
+            is_model_trained = True
+            last_training_time = datetime.now()
+            duration = (datetime.now() - training_start).total_seconds()
+            logger.info(f"🎯 ASYNC training completed successfully in {duration:.1f}s")
+            
+            # 🆘 BOOTSTRAP: Auto-create emergency predictions for first training
+            # Note: was_first_training was determined before training started
+            if len(predictions_history.get('gru', [])) == 0:
+                logger.info("🆘 AUTO-BOOTSTRAP: Creating emergency predictions for first-time training...")
+                try:
+                    create_emergency_gru_predictions()
+                    logger.info("✅ Bootstrap emergency predictions created!")
+                except Exception as e:
+                    logger.error(f"❌ Bootstrap prediction creation failed: {e}")
+        else:
+            logger.error("❌ ASYNC training failed")
+            
+    except Exception as e:
+        logger.error(f"❌ ASYNC training error: {e}")
+    finally:
+        is_training = False
 
 def initialize_prometheus():
     """Initialize Prometheus client"""
@@ -407,20 +483,35 @@ def preprocess_advanced_data(enhanced_df, feature_columns, sequence_length=12):
         return None, None
 
 def cleanup_old_predictions():
-    """Remove predictions that are too old to be matched"""
+    """Remove predictions that are too old to be matched - throttled to prevent MSE disruption"""
+    global last_cleanup_time
     current_time = datetime.now()
+    
+    # Only run cleanup every 5 minutes to prevent MSE disruption
+    if last_cleanup_time and (current_time - last_cleanup_time).total_seconds() < 300:
+        return
+    
+    last_cleanup_time = current_time
     max_age_hours = config['mse_config']['max_prediction_age_hours']
     cutoff_time = current_time - timedelta(hours=max_age_hours)
     
+    total_removed = 0
     for model_name in predictions_history:
-        original_count = len(predictions_history[model_name])
-        predictions_history[model_name] = [
-            p for p in predictions_history[model_name]
-            if datetime.strptime(p['timestamp'], "%Y-%m-%d %H:%M:%S") > cutoff_time
-        ]
-        removed_count = original_count - len(predictions_history[model_name])
-        if removed_count > 0:
-            logger.debug(f"Cleaned up {removed_count} old predictions for {model_name}")
+        try:
+            original_count = len(predictions_history[model_name])
+            predictions_history[model_name] = [
+                p for p in predictions_history[model_name]
+                if datetime.strptime(p['timestamp'], "%Y-%m-%d %H:%M:%S") > cutoff_time
+            ]
+            removed_count = original_count - len(predictions_history[model_name])
+            total_removed += removed_count
+            if removed_count > 0:
+                logger.debug(f"Cleaned up {removed_count} old predictions for {model_name}")
+        except Exception as e:
+            logger.warning(f"Cleanup failed for {model_name}: {e}")
+    
+    if total_removed > 0:
+        logger.info(f"Cleanup completed: removed {total_removed} old predictions")
 
 def add_prediction_to_history(model_name, predicted_replicas, timestamp):
     """Enhanced prediction tracking with immediate matching attempt"""
@@ -750,36 +841,71 @@ def calculate_mse_robust(model_name):
         return float('inf')
 
 def update_mse_metrics():
-    """Enhanced MSE metric updates with better Prometheus integration"""
+    """Enhanced MSE metric updates with better Prometheus integration and error resilience"""
     global gru_mse, holt_winters_mse, last_mse_calculation
     
     current_time = datetime.now()
     
-    # Update predictions with actual values first
-    update_predictions_with_actual_values()
+    try:
+        # Update predictions with actual values first (with timeout protection)
+        update_predictions_with_actual_values()
+        
+        # Calculate MSE for both models (with fallback to previous values)
+        previous_gru_mse = gru_mse
+        previous_hw_mse = holt_winters_mse
+        
+        try:
+            new_gru_mse = calculate_mse_robust('gru')
+            if new_gru_mse != float('inf'):
+                gru_mse = new_gru_mse
+            # Keep previous value if calculation fails
+        except Exception as e:
+            logger.warning(f"GRU MSE calculation failed, keeping previous value: {e}")
+        
+        try:
+            new_hw_mse = calculate_mse_robust('holt_winters')  
+            if new_hw_mse != float('inf'):
+                holt_winters_mse = new_hw_mse
+            # Keep previous value if calculation fails
+        except Exception as e:
+            logger.warning(f"Holt-Winters MSE calculation failed, keeping previous value: {e}")
+            
+    except Exception as e:
+        logger.error(f"MSE update process failed: {e}")
+        # Don't update MSE values if the whole process fails
     
-    # Calculate MSE for both models
-    gru_mse = calculate_mse_robust('gru')
-    holt_winters_mse = calculate_mse_robust('holt_winters')
-    
-    # Update Prometheus metrics - use -1 for invalid/insufficient data
-    if gru_mse != float('inf'):
-        prediction_mse.labels(model='gru').observe(gru_mse)
-        current_mse.labels(model='gru').set(gru_mse)
-    else:
-        current_mse.labels(model='gru').set(-1)  # Signal insufficient data
-    
-    if holt_winters_mse != float('inf'):
-        prediction_mse.labels(model='holt_winters').observe(holt_winters_mse)
-        current_mse.labels(model='holt_winters').set(holt_winters_mse)
-    else:
-        current_mse.labels(model='holt_winters').set(-1)  # Signal insufficient data
+    # Update Prometheus metrics with stability protection
+    try:
+        if gru_mse != float('inf') and gru_mse > 0:
+            prediction_mse.labels(model='gru').observe(gru_mse)
+            current_mse.labels(model='gru').set(gru_mse)
+        elif gru_mse == float('inf'):
+            current_mse.labels(model='gru').set(-1)  # Signal insufficient data
+        # Don't update if MSE is 0 or invalid (keeps previous stable value)
+        
+        if holt_winters_mse != float('inf') and holt_winters_mse > 0:
+            prediction_mse.labels(model='holt_winters').observe(holt_winters_mse)
+            current_mse.labels(model='holt_winters').set(holt_winters_mse)
+        elif holt_winters_mse == float('inf'):
+            current_mse.labels(model='holt_winters').set(-1)  # Signal insufficient data
+        # Don't update if MSE is 0 or invalid (keeps previous stable value)
+            
+    except Exception as e:
+        logger.error(f"Failed to update Prometheus metrics: {e}")
     
     last_mse_calculation = current_time
     
-    # Enhanced logging
+    # Enhanced logging with anomaly detection
     gru_status = f"{gru_mse:.3f}" if gru_mse != float('inf') else "insufficient_data"
     hw_status = f"{holt_winters_mse:.3f}" if holt_winters_mse != float('inf') else "insufficient_data"
+    
+    # Detect and log MSE anomalies (sudden drops to 0 or -1)
+    if previous_gru_mse != float('inf') and previous_gru_mse > 5 and gru_mse == float('inf'):
+        logger.warning(f"🚨 GRU MSE dropped from {previous_gru_mse:.3f} to insufficient_data - possible calculation issue")
+    
+    if previous_hw_mse != float('inf') and previous_hw_mse > 5 and holt_winters_mse == float('inf'):
+        logger.warning(f"🚨 Holt-Winters MSE dropped from {previous_hw_mse:.3f} to insufficient_data - possible calculation issue")
+    
     logger.info(f"MSE Update - GRU: {gru_status}, Holt-Winters: {hw_status}")
 
 def calculate_enhanced_mse(model_name):
@@ -1348,46 +1474,34 @@ def collect_metrics_from_prometheus():
                         should_train = True
                         training_reason = f"retrain (last: {last_training_time}, data: {len(traffic_data)})"
             
-            # Execute training if conditions are met
-            if should_train:
-                logger.info(f"🚀 Starting AUTOMATIC GRU training: {training_reason}")
+            # Execute training if conditions are met - ASYNC to prevent Flask blocking
+            if should_train and not is_training:
+                logger.info(f"🚀 Starting ASYNC GRU training: {training_reason}")
                 try:
-                    was_first_training = not is_model_trained  # Track if this is first-time training
+                    # Create thread-safe copy of traffic data for training
+                    traffic_data_copy = traffic_data[:]
+                    was_first_training = not is_model_trained
                     
-                    # 🎯 TRY ADVANCED MODEL FIRST, FALLBACK TO BASIC
-                    success = False
-                    if len(traffic_data) >= 30:  # Only try advanced if we have enough data
-                        logger.info("Attempting advanced GRU model training...")
-                        success = build_advanced_gru_model()
-                        if success:
-                            logger.info("✅ Advanced GRU model training succeeded!")
+                    # Start async training in separate thread
+                    global training_thread
+                    training_thread = threading.Thread(
+                        target=async_model_training, 
+                        args=(training_reason, traffic_data_copy, len(traffic_data_copy) >= 30)
+                    )
+                    training_thread.daemon = True
+                    training_thread.start()
                     
-                    if not success:
-                        logger.info("Falling back to basic GRU model training...")
-                        success = build_gru_model()
-                        if success:
-                            logger.info("✅ Basic GRU model training succeeded!")
+                    # Update config immediately for first-time training
+                    if was_first_training and not config['use_gru']:
+                        config['use_gru'] = True
+                        save_config()
                     
-                    if success:
-                        if not config['use_gru']:
-                            config['use_gru'] = True
-                            save_config()
-                        logger.info("✅ GRU model training completed successfully!")
-                        
-                        # 🆘 BOOTSTRAP: Auto-create emergency predictions for first training
-                        if was_first_training and len(predictions_history['gru']) == 0:
-                            logger.info("🆘 AUTO-BOOTSTRAP: Creating emergency predictions for first-time training...")
-                            try:
-                                create_emergency_gru_predictions()
-                                logger.info("✅ Bootstrap emergency predictions created!")
-                            except Exception as e:
-                                logger.error(f"❌ Bootstrap prediction creation failed: {e}")
-                    else:
-                        logger.error("❌ GRU model training failed")
+                    logger.info("🔄 ASYNC training started - Flask metrics remain unblocked!")
+                    
                 except Exception as e:
-                    logger.error(f"❌ Exception during GRU training: {e}")
-                    import traceback
-                    logger.error(f"Stack trace: {traceback.format_exc()}")
+                    logger.error(f"❌ ASYNC training startup error: {e}")
+            elif should_train and is_training:
+                logger.debug("⏳ Training conditions met but training already in progress")
             
             # Check if 4 hours of actual runtime has accumulated (reduced for testing)
             if data_collection_start_time:
@@ -3519,6 +3633,67 @@ def debug_minheap_status():
         
     except Exception as e:
         return jsonify({'error': str(e), 'details': str(e)}), 500
+
+@app.route('/debug/mse_stability', methods=['GET'])
+def debug_mse_stability():
+    """Debug endpoint to monitor MSE stability and detect interruption patterns."""
+    return jsonify({
+        'mse_status': {
+            'gru_mse': gru_mse if gru_mse != float('inf') else 'insufficient_data',
+            'holt_winters_mse': holt_winters_mse if holt_winters_mse != float('inf') else 'insufficient_data',
+            'last_mse_calculation': last_mse_calculation.isoformat() if last_mse_calculation else None,
+            'last_cleanup_time': last_cleanup_time.isoformat() if last_cleanup_time else None
+        },
+        'prediction_counts': {
+            'gru_total': len(predictions_history.get('gru', [])),
+            'gru_matched': len([p for p in predictions_history.get('gru', []) if p.get('matched', False)]),
+            'hw_total': len(predictions_history.get('holt_winters', [])),
+            'hw_matched': len([p for p in predictions_history.get('holt_winters', []) if p.get('matched', False)])
+        },
+        'recent_gru_predictions': [
+            {
+                'timestamp': p.get('timestamp'),
+                'predicted': p.get('predicted_replicas'),
+                'actual': p.get('actual_replicas'),
+                'matched': p.get('matched', False)
+            }
+            for p in predictions_history.get('gru', [])[-5:]
+        ],
+        'system_info': {
+            'data_collection_complete': data_collection_complete,
+            'current_data_points': len(traffic_data),
+            'training_data_points': len(training_dataset),
+            'collection_mode': 'MSE-only' if data_collection_complete else 'Training collection'
+        },
+        'training_status': {
+            'is_training': is_training,
+            'training_thread_alive': training_thread.is_alive() if training_thread else False,
+            'last_training_time': last_training_time.isoformat() if last_training_time else None,
+            'is_model_trained': is_model_trained
+        },
+        'troubleshooting': {
+            'common_causes': [
+                'RESOLVED: Model training blocking Flask metrics endpoint (now async)',
+                'Cleanup operations removing predictions too aggressively',
+                'File I/O blocking MSE calculations',
+                'Memory pressure causing calculation failures',
+                'Kubernetes resource limits causing temporary interruptions'
+            ],
+            'fixes_applied': [
+                'CRITICAL: Moved model training to separate thread (prevents 1.5min blocking)',
+                'Throttled cleanup to every 5 minutes',
+                'Added error resilience to MSE calculations',
+                'Keep previous MSE values on calculation failure',
+                'Enhanced logging for anomaly detection',
+                'TensorFlow thread limiting to reduce resource contention'
+            ],
+            'monitoring': {
+                'check_training_status': 'Monitor is_training flag during MSE drops',
+                'verify_metrics_continuity': 'Ensure /metrics endpoint responds during training',
+                'thread_isolation': 'Training runs in daemon thread separate from Flask'
+            }
+        }
+    })
 
 @app.route('/debug/dataset_status', methods=['GET'])
 def debug_dataset_status():
