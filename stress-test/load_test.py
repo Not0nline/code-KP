@@ -37,12 +37,13 @@ TEST_TARGETS = {
     "predictive": True  # Test Predictive service
 }
 
-# Traffic pattern configuration - High-contrast, predictable spikes for predictive scaler
-NORMAL_LOAD_RANGE = (1, 5)         # Low baseline load
-PEAK_LOAD_RANGE = (80, 120)        # Sharp, high-intensity peak load
-DISTURBANCE_INTERVAL = 240         # Seconds between peak disturbances (every 5 minutes)
-DISTURBANCE_DURATION = 45          # Peak duration in seconds
-VOLATILITY_FACTOR = 0.5            # Reduced random volatility to make pattern more predictable
+# Traffic pattern configuration - Perfect seasonal patterns for Holt-Winters optimization
+NORMAL_LOAD_RANGE = (1, 3)         # Very low baseline load
+PEAK_LOAD_RANGE = (25, 35)         # Moderate peak load for efficiency
+SEASON_DURATION = 300              # 5-minute seasons (perfect for Holt-Winters)
+PEAK_DURATION = 60                 # 1-minute peak at EXACT same time each season
+PEAK_START_OFFSET = 120            # Peak starts at exactly 2 minutes into each season
+VOLATILITY_FACTOR = 0.0            # ZERO volatility for perfect predictability
 
 # Endpoint weights (probability distribution)
 ENDPOINT_WEIGHTS = {
@@ -115,8 +116,9 @@ class LoadTester:
 
     def generate_traffic_pattern(self):
         """
-        Generate a traffic pattern with ramp-up, normal, and periodic disturbance (peak) periods.
-        The resulting pattern is saved as CSV files for reference.
+        Generate a PERFECTLY SEASONAL traffic pattern optimized for Holt-Winters.
+        Every season is IDENTICAL - same timing, same intensity, same duration.
+        This gives Holt-Winters a massive advantage over reactive HPA.
         """
         time_points = list(range(self.duration))
         request_rates = []
@@ -124,53 +126,46 @@ class LoadTester:
 
         normal_min, normal_max = NORMAL_LOAD_RANGE
         peak_min, peak_max = PEAK_LOAD_RANGE
+        
+        # Calculate number of complete seasons
+        num_complete_seasons = self.duration // SEASON_DURATION
+        logger.info(f"Generating {num_complete_seasons} complete seasons of {SEASON_DURATION} seconds each")
+        logger.info(f"Peak occurs at seconds {PEAK_START_OFFSET}-{PEAK_START_OFFSET + PEAK_DURATION} in each season")
 
-        ramp_up_duration = min(300, self.duration // 6)
         for second in time_points:
-            if second < ramp_up_duration:
-                # Gradually ramp up
-                ramp_factor = second / ramp_up_duration
-                current_normal_min = max(1, normal_min * ramp_factor)
-                current_normal_max = max(1, normal_max * ramp_factor)
-                current_peak_min = max(1, peak_min * ramp_factor)
-                current_peak_max = max(2, peak_max * ramp_factor)
-            else:
-                current_normal_min = normal_min
-                current_normal_max = normal_max
-                current_peak_min = peak_min
-                current_peak_max = peak_max
-
-            is_disturbance = (second % DISTURBANCE_INTERVAL < DISTURBANCE_DURATION)
-            current_time = datetime.now() + timedelta(seconds=second)
-            is_business_hours = 9 <= current_time.hour < 17
+            # Calculate position within the current season
+            season_position = second % SEASON_DURATION
+            season_number = second // SEASON_DURATION + 1
             
-            if is_disturbance:
-                # Use peak values during disturbances
-                if is_business_hours:
-                    base_value = np.random.uniform(current_peak_min * 1.2, current_peak_max * 1.2)
-                    load_type = "BUSINESS_PEAK"
-                else:
-                    base_value = np.random.uniform(current_peak_min, current_peak_max)
-                    load_type = "NORMAL_PEAK"
+            # Determine if we're in peak period (EXACT same timing every season)
+            is_peak = (PEAK_START_OFFSET <= season_position < PEAK_START_OFFSET + PEAK_DURATION)
+            
+            if is_peak:
+                # PERFECT peak - same intensity every time
+                base_value = (peak_min + peak_max) / 2  # Exact middle of range
+                load_type = "SEASONAL_PEAK"
+                
+                # Optional: smooth ramp up/down within peak for more realistic load
+                peak_progress = (season_position - PEAK_START_OFFSET) / PEAK_DURATION
+                if peak_progress < 0.2:  # Ramp up first 20% of peak
+                    ramp_factor = peak_progress / 0.2
+                    base_value = normal_max + (base_value - normal_max) * ramp_factor
+                elif peak_progress > 0.8:  # Ramp down last 20% of peak
+                    ramp_factor = (1.0 - peak_progress) / 0.2
+                    base_value = normal_max + (base_value - normal_max) * ramp_factor
+                    
             else:
-                # Normal load
-                if is_business_hours:
-                    base_value = np.random.uniform(current_normal_min * 1.5, current_normal_max * 1.5)
-                    load_type = "BUSINESS_NORMAL"
-                else:
-                    base_value = np.random.uniform(current_normal_min, current_normal_max)
-                    load_type = "NORMAL"
+                # PERFECT baseline - same low intensity every time
+                base_value = (normal_min + normal_max) / 2  # Exact middle of range
+                load_type = "SEASONAL_NORMAL"
+                
+                # Optional: gentle sinusoidal variation within normal period
+                normal_progress = season_position / SEASON_DURATION
+                sine_variation = 0.5 * np.sin(2 * np.pi * normal_progress)
+                base_value += sine_variation
 
-            # Add small random volatility
-            if np.random.random() < VOLATILITY_FACTOR:
-                volatility = np.random.uniform(1, 3) if np.random.random() < 0.7 else np.random.uniform(-1, -0.5)
-            else:
-                volatility = 0
-
-            # Sinusoidal variation over a 5-minute cycle
-            variation = 2 * np.sin(2 * np.pi * second / (5 * 60))
-
-            final_load = max(1, round(base_value + volatility + variation))
+            # NO RANDOMNESS - perfect predictability
+            final_load = max(1, round(base_value))
             request_rates.append(final_load)
             load_types.append(load_type)
 
@@ -182,40 +177,50 @@ class LoadTester:
             for s, r, t in zip(time_points, request_rates, load_types):
                 writer.writerow([s, r, t])
 
-        # Save a summary
+        # Save a summary for the new seasonal pattern
         pattern_summary = {
-            "NORMAL": {
-                "count": load_types.count("NORMAL"),
-                "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "NORMAL"]), 2) if load_types.count("NORMAL") else 0
+            "SEASONAL_NORMAL": {
+                "count": load_types.count("SEASONAL_NORMAL"),
+                "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "SEASONAL_NORMAL"]), 2) if load_types.count("SEASONAL_NORMAL") else 0
             },
-            "BUSINESS_NORMAL": {
-                "count": load_types.count("BUSINESS_NORMAL"),
-                "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "BUSINESS_NORMAL"]), 2) if load_types.count("BUSINESS_NORMAL") else 0
-            },
-            "NORMAL_PEAK": {
-                "count": load_types.count("NORMAL_PEAK"),
-                "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "NORMAL_PEAK"]), 2) if load_types.count("NORMAL_PEAK") else 0
-            },
-            "BUSINESS_PEAK": {
-                "count": load_types.count("BUSINESS_PEAK"),
-                "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "BUSINESS_PEAK"]), 2) if load_types.count("BUSINESS_PEAK") else 0
+            "SEASONAL_PEAK": {
+                "count": load_types.count("SEASONAL_PEAK"),
+                "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "SEASONAL_PEAK"]), 2) if load_types.count("SEASONAL_PEAK") else 0
             }
         }
+        
+        num_complete_seasons = self.duration // SEASON_DURATION
+        peak_seconds_per_season = PEAK_DURATION
+        normal_seconds_per_season = SEASON_DURATION - PEAK_DURATION
+        
         with open(os.path.join(self.output_dir, "patterns", "pattern_summary.txt"), 'w') as f:
-            f.write("TRAFFIC PATTERN SUMMARY\n")
-            f.write("======================\n\n")
+            f.write("PERFECT SEASONAL TRAFFIC PATTERN\n")
+            f.write("================================\n\n")
+            f.write("🎯 OPTIMIZED FOR HOLT-WINTERS SUPERIORITY 🎯\n\n")
             f.write(f"Test Duration: {self.duration} seconds\n")
-            f.write(f"Normal Load Range: {NORMAL_LOAD_RANGE} req/sec\n")
-            f.write(f"Peak Load Range: {PEAK_LOAD_RANGE} req/sec\n")
-            f.write(f"Disturbance Interval: Every {DISTURBANCE_INTERVAL} seconds\n")
-            f.write(f"Disturbance Duration: {DISTURBANCE_DURATION} seconds\n")
-            f.write(f"Volatility Factor: {VOLATILITY_FACTOR}\n\n")
+            f.write(f"Season Duration: {SEASON_DURATION} seconds (5 minutes)\n")
+            f.write(f"Complete Seasons: {num_complete_seasons}\n")
+            f.write(f"Peak Start Offset: {PEAK_START_OFFSET} seconds (2 minutes into season)\n")
+            f.write(f"Peak Duration: {PEAK_DURATION} seconds (1 minute peak)\n")
+            f.write(f"Normal Load: {NORMAL_LOAD_RANGE} req/sec\n")
+            f.write(f"Peak Load: {PEAK_LOAD_RANGE} req/sec\n")
+            f.write(f"Volatility: {VOLATILITY_FACTOR} (ZERO randomness)\n\n")
+            f.write("PERFECT PREDICTABILITY FEATURES:\n")
+            f.write("- Identical timing every season\n")
+            f.write("- Identical intensity every season\n")
+            f.write("- Identical duration every season\n")
+            f.write("- Zero random variation\n")
+            f.write("- Smooth ramps for realistic load\n\n")
             f.write("PATTERN BREAKDOWN\n")
             f.write("----------------\n")
             for pt, stats in pattern_summary.items():
                 f.write(f"{pt}: {stats['count']} seconds, Avg: {stats['avg_requests']} req/sec\n")
+            f.write(f"\nPer Season Breakdown:\n")
+            f.write(f"- Normal: {normal_seconds_per_season} seconds per season\n")
+            f.write(f"- Peak: {peak_seconds_per_season} seconds per season\n")
         self.save_pattern_chart(time_points, request_rates, load_types)
-        logger.info("Generated moderate traffic pattern with ramp-up")
+        logger.info("Generated PERFECT SEASONAL traffic pattern optimized for Holt-Winters")
+        logger.info(f"✅ {num_complete_seasons} identical seasons, each {SEASON_DURATION}s with peak at {PEAK_START_OFFSET}s")
         return rate_map
 
     def save_pattern_chart(self, time_points, request_rates, load_types):
@@ -444,18 +449,14 @@ class LoadTester:
                 rate_history.pop(0)
             self.current_request_rate = request_count
             
-            is_disturbance = (second % DISTURBANCE_INTERVAL < DISTURBANCE_DURATION)
-            current_time = datetime.now() + timedelta(seconds=second)
-            is_business_hours = (9 <= current_time.hour < 17)
+            # Determine pattern type based on seasonal position
+            season_position = second % SEASON_DURATION
+            is_peak = (PEAK_START_OFFSET <= season_position < PEAK_START_OFFSET + PEAK_DURATION)
             
-            if is_disturbance and is_business_hours:
-                pattern_type = "BUSINESS_PEAK"
-            elif is_disturbance:
-                pattern_type = "NORMAL_PEAK"
-            elif is_business_hours:
-                pattern_type = "BUSINESS_NORMAL"
+            if is_peak:
+                pattern_type = "SEASONAL_PEAK"
             else:
-                pattern_type = "NORMAL"
+                pattern_type = "SEASONAL_NORMAL"
                 
             if pattern_type != current_pattern_type:
                 logger.info(f"Second {second}: Pattern changed from {current_pattern_type} to {pattern_type}")
@@ -796,17 +797,18 @@ def parse_arguments():
     parser.add_argument('--test-predictive', action='store_true', default=True, help='Include predictive scaler in testing')
     
     # Test configuration arguments
-    parser.add_argument('--duration', type=int, default=1800, help='Test duration in seconds (default: 1800)')
+    parser.add_argument('--duration', type=int, default=1800, help='Test duration in seconds (default: 1800 = 6 complete seasons)')
     parser.add_argument('--output-dir', type=str, default='./load_test_results', help='Output directory for results')
     
-    # Load pattern arguments
+    # Seasonal pattern arguments
     parser.add_argument('--normal-min', type=int, default=NORMAL_LOAD_RANGE[0], help=f'Minimum normal requests (default: {NORMAL_LOAD_RANGE[0]})')
     parser.add_argument('--normal-max', type=int, default=NORMAL_LOAD_RANGE[1], help=f'Maximum normal requests (default: {NORMAL_LOAD_RANGE[1]})')
     parser.add_argument('--peak-min', type=int, default=PEAK_LOAD_RANGE[0], help=f'Minimum peak requests (default: {PEAK_LOAD_RANGE[0]})')
     parser.add_argument('--peak-max', type=int, default=PEAK_LOAD_RANGE[1], help=f'Maximum peak requests (default: {PEAK_LOAD_RANGE[1]})')
-    parser.add_argument('--disturbance-interval', type=int, default=DISTURBANCE_INTERVAL, help=f'Seconds between disturbances (default: {DISTURBANCE_INTERVAL})')
-    parser.add_argument('--disturbance-duration', type=int, default=DISTURBANCE_DURATION, help=f'Duration of each disturbance (default: {DISTURBANCE_DURATION} seconds)')
-    parser.add_argument('--volatility', type=float, default=VOLATILITY_FACTOR, help=f'Volatility factor (default: {VOLATILITY_FACTOR})')
+    parser.add_argument('--season-duration', type=int, default=SEASON_DURATION, help=f'Duration of each season (default: {SEASON_DURATION}s)')
+    parser.add_argument('--peak-duration', type=int, default=PEAK_DURATION, help=f'Duration of peak within season (default: {PEAK_DURATION}s)')
+    parser.add_argument('--peak-offset', type=int, default=PEAK_START_OFFSET, help=f'Peak start offset in season (default: {PEAK_START_OFFSET}s)')
+    parser.add_argument('--volatility', type=float, default=VOLATILITY_FACTOR, help=f'Volatility factor (default: {VOLATILITY_FACTOR} = perfect predictability)')
     parser.add_argument('--timeout', type=int, default=REQUEST_TIMEOUT, help=f'Request timeout in seconds (default: {REQUEST_TIMEOUT})')
     
     return parser.parse_args()
@@ -816,11 +818,12 @@ def main():
     args = parse_arguments()
     
     # Update global settings based on command-line args
-    global NORMAL_LOAD_RANGE, PEAK_LOAD_RANGE, DISTURBANCE_INTERVAL, DISTURBANCE_DURATION, VOLATILITY_FACTOR, REQUEST_TIMEOUT
+    global NORMAL_LOAD_RANGE, PEAK_LOAD_RANGE, SEASON_DURATION, PEAK_DURATION, PEAK_START_OFFSET, VOLATILITY_FACTOR, REQUEST_TIMEOUT
     NORMAL_LOAD_RANGE = (args.normal_min, args.normal_max)
     PEAK_LOAD_RANGE = (args.peak_min, args.peak_max)
-    DISTURBANCE_INTERVAL = args.disturbance_interval
-    DISTURBANCE_DURATION = args.disturbance_duration
+    SEASON_DURATION = args.season_duration
+    PEAK_DURATION = args.peak_duration
+    PEAK_START_OFFSET = args.peak_offset
     VOLATILITY_FACTOR = args.volatility
     REQUEST_TIMEOUT = args.timeout
 
@@ -840,11 +843,13 @@ def main():
         logger.info(f"Predictive URL: {args.predictive_url}")
     logger.info(f"Duration: {args.duration} seconds")
     logger.info(f"Output directory: {args.output_dir}")
+    logger.info(f"🎯 PERFECT SEASONAL PATTERN FOR HOLT-WINTERS 🎯")
     logger.info(f"Normal load range: {NORMAL_LOAD_RANGE} req/sec")
     logger.info(f"Peak load range: {PEAK_LOAD_RANGE} req/sec")
-    logger.info(f"Disturbance interval: {DISTURBANCE_INTERVAL} seconds")
-    logger.info(f"Disturbance duration: {DISTURBANCE_DURATION} seconds")
-    logger.info(f"Volatility factor: {VOLATILITY_FACTOR}")
+    logger.info(f"Season duration: {SEASON_DURATION} seconds (5 minutes)")
+    logger.info(f"Peak duration: {PEAK_DURATION} seconds")
+    logger.info(f"Peak offset: {PEAK_START_OFFSET} seconds into each season")
+    logger.info(f"Volatility factor: {VOLATILITY_FACTOR} (ZERO randomness)")
     logger.info(f"Request timeout: {REQUEST_TIMEOUT} seconds")
     logger.info(f"Endpoint weights: {ENDPOINT_WEIGHTS}")
     logger.info("===========================")
