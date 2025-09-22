@@ -41,3 +41,23 @@ kubectl port-forward service/predictive-scaler 8080:5000
 curl -X POST http://localhost:8080/reset_data
 
 curl http://localhost:8080/status
+
+=== Force MSE Calculation ===
+# Primary command to force MSE calculation (use port 8080 if port-forwarded)
+curl -X POST http://localhost:8080/debug/force_mse_calculation
+
+# Alternative with port 5000 (if directly accessible)
+curl -X POST http://localhost:5000/debug/force_mse_calculation
+
+=== MSE Monitoring Commands ===
+# Get current MSE data with detailed history
+curl http://localhost:5000/mse | jq
+
+# Get enhanced MSE with accuracy metrics
+curl http://localhost:5000/debug/enhanced_mse | jq
+
+# Check MSE stability and troubleshooting info
+curl http://localhost:5000/debug/mse_stability | jq
+
+# Force MSE metrics update
+curl -X POST http://localhost:5000/debug/force_mse_update
