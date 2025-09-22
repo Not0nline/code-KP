@@ -240,17 +240,24 @@ kubectl wait --for=condition=Ready pod/load-test --timeout=60s
 
 **Copy test script and install dependencies:**
 ```bash
-kubectl cp stress-test/load_test.py load-test:/load_test.py
-kubectl exec -it load-test -- pip install requests numpy pandas
+kubectl cp stress-test/load_test.py load-test:/tmp/load_test.py
+kubectl exec -it load-test -- bash -c "pip install requests numpy pandas"
 ```
 
 **Run load test:**
 ```bash
-# Basic test
-kubectl exec -it load-test -- python /load_test.py
+# Basic load test targeting combined service (300 seconds = 5 minutes)
+kubectl exec -it load-test -- bash -c "cd /tmp && python load_test.py --duration 300 --target combined"
 
-# Custom parameters (for picking which model to test)
-# kubectl exec -it load-test -- python /load_test.py --target [hpa/combined/both]
+# Extended load test (600 seconds = 10 minutes) 
+kubectl exec -it load-test -- bash -c "cd /tmp && python load_test.py --duration 600 --target combined"
+
+# Test different targets:
+# kubectl exec -it load-test -- bash -c "cd /tmp && python load_test.py --duration 300 --target hpa"      # For HPA setup
+# kubectl exec -it load-test -- bash -c "cd /tmp && python load_test.py --duration 300 --target combined" # For Combined setup
+
+# Monitor load test progress (in another terminal):
+kubectl logs load-test --tail=20 -f
 ```
 
 ## Verification and Monitoring
@@ -292,6 +299,26 @@ kubectl get servicemonitors -n monitoring -o yaml
 **Verify Prometheus targets:**
 - Access Prometheus UI → Status → Targets
 - Ensure your services are listed and UP
+
+**Load Test Troubleshooting:**
+```bash
+# Check if load test pod is running properly
+kubectl get pod load-test
+kubectl describe pod load-test
+
+# If load test pod is just sleeping, run manually:
+kubectl exec -it load-test -- bash -c "
+  pip install requests numpy pandas && 
+  cd /tmp && 
+  python load_test.py --duration 300 --target combined
+"
+
+# Monitor CPU usage during load test:
+kubectl top pods | grep product-app-combined
+
+# Check autoscaler data collection:
+curl http://localhost:5000/status | jq '{current_cpu, data_points, data_points_collected}'
+```
 
 ## Important Notes
 
