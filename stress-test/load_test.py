@@ -38,7 +38,7 @@ TEST_TARGETS = {
 }
 
 # Traffic pattern configuration - Perfect seasonal patterns for Holt-Winters optimization
-NORMAL_LOAD_RANGE = (1, 3)         # Very low baseline load
+NORMAL_LOAD_RANGE = (5, 8)         # Increased baseline load to ensure CPU > 2%
 PEAK_LOAD_RANGE = (25, 35)         # Moderate peak load for efficiency
 SEASON_DURATION = 300              # 5-minute seasons (perfect for Holt-Winters)
 PEAK_DURATION = 60                 # 1-minute peak at EXACT same time each season
