@@ -37,13 +37,14 @@ TEST_TARGETS = {
     "predictive": True  # Test Predictive service
 }
 
-# Traffic pattern configuration - Perfect seasonal patterns for Holt-Winters optimization
-NORMAL_LOAD_RANGE = (5, 8)         # Increased baseline load to ensure CPU > 2%
-PEAK_LOAD_RANGE = (25, 35)         # Moderate peak load for efficiency
-SEASON_DURATION = 300              # 5-minute seasons (perfect for Holt-Winters)
-PEAK_DURATION = 60                 # 1-minute peak at EXACT same time each season
-PEAK_START_OFFSET = 120            # Peak starts at exactly 2 minutes into each season
-VOLATILITY_FACTOR = 0.0            # ZERO volatility for perfect predictability
+# Traffic pattern configuration - Volatile patterns for testing GRU and Holt-Winters adaptability
+NORMAL_LOAD_RANGE = (2, 5)           # Baseline requests per second during normal periods  
+PEAK_LOAD_RANGE = (35, 50)           # Peak requests per second during high-demand periods
+SEASON_DURATION = 300              # 5-minute seasons
+PEAK_DURATION = 30                 # Shorter, sharper peaks (30s instead of 60s)
+PEAK_START_OFFSET = 60             # Peak starts at 1 minute (first sub-season)
+SECOND_PEAK_OFFSET = 210           # Second peak at 3.5 minutes (second sub-season)
+VOLATILITY_FACTOR = 0.3            # HIGH volatility for unpredictable patterns
 
 # Endpoint weights (probability distribution)
 ENDPOINT_WEIGHTS = {
@@ -130,41 +131,61 @@ class LoadTester:
         # Calculate number of complete seasons
         num_complete_seasons = self.duration // SEASON_DURATION
         logger.info(f"Generating {num_complete_seasons} complete seasons of {SEASON_DURATION} seconds each")
-        logger.info(f"Peak occurs at seconds {PEAK_START_OFFSET}-{PEAK_START_OFFSET + PEAK_DURATION} in each season")
+        logger.info(f"Double-season pattern: First peak at {PEAK_START_OFFSET}-{PEAK_START_OFFSET + PEAK_DURATION}s, Second peak at {SECOND_PEAK_OFFSET}-{SECOND_PEAK_OFFSET + PEAK_DURATION}s")
+        logger.info(f"Volatility factor: {VOLATILITY_FACTOR} for less predictable patterns")
 
         for second in time_points:
             # Calculate position within the current season
             season_position = second % SEASON_DURATION
             season_number = second // SEASON_DURATION + 1
             
-            # Determine if we're in peak period (EXACT same timing every season)
-            is_peak = (PEAK_START_OFFSET <= season_position < PEAK_START_OFFSET + PEAK_DURATION)
+            # Double-season pattern: Two peaks within each 5-minute season
+            # First peak at 1 minute (60s), second peak at 3.5 minutes (210s)
+            first_peak_start = PEAK_START_OFFSET  # 60s
+            first_peak_end = PEAK_START_OFFSET + PEAK_DURATION  # 60s + 45s = 105s
+            second_peak_start = SECOND_PEAK_OFFSET  # 210s (3.5 minutes)
+            second_peak_end = SECOND_PEAK_OFFSET + PEAK_DURATION  # 210s + 45s = 255s
             
-            if is_peak:
-                # PERFECT peak - same intensity every time
-                base_value = (peak_min + peak_max) / 2  # Exact middle of range
-                load_type = "SEASONAL_PEAK"
+            is_first_peak = (first_peak_start <= season_position < first_peak_end)
+            is_second_peak = (second_peak_start <= season_position < second_peak_end)
+            is_any_peak = is_first_peak or is_second_peak
+            
+            if is_any_peak:
+                # Determine which peak and calculate intensity
+                if is_first_peak:
+                    peak_progress = (season_position - first_peak_start) / PEAK_DURATION
+                    load_type = "SEASONAL_PEAK_1"
+                else:  # is_second_peak
+                    peak_progress = (season_position - second_peak_start) / PEAK_DURATION
+                    load_type = "SEASONAL_PEAK_2"
                 
-                # Optional: smooth ramp up/down within peak for more realistic load
-                peak_progress = (season_position - PEAK_START_OFFSET) / PEAK_DURATION
-                if peak_progress < 0.2:  # Ramp up first 20% of peak
-                    ramp_factor = peak_progress / 0.2
+                # Base peak value with volatility
+                base_value = (peak_min + peak_max) / 2
+                
+                # Quicker, less smooth transitions - steeper ramp up/down
+                if peak_progress < 0.1:  # Very quick ramp up (10% of peak)
+                    ramp_factor = peak_progress / 0.1
                     base_value = normal_max + (base_value - normal_max) * ramp_factor
-                elif peak_progress > 0.8:  # Ramp down last 20% of peak
-                    ramp_factor = (1.0 - peak_progress) / 0.2
+                elif peak_progress > 0.9:  # Very quick ramp down (last 10% of peak)
+                    ramp_factor = (1.0 - peak_progress) / 0.1
                     base_value = normal_max + (base_value - normal_max) * ramp_factor
                     
             else:
-                # PERFECT baseline - same low intensity every time
-                base_value = (normal_min + normal_max) / 2  # Exact middle of range
+                # Normal load between peaks with volatility
+                base_value = (normal_min + normal_max) / 2
                 load_type = "SEASONAL_NORMAL"
                 
-                # Optional: gentle sinusoidal variation within normal period
+                # Add volatility - more variation in normal periods
                 normal_progress = season_position / SEASON_DURATION
-                sine_variation = 0.5 * np.sin(2 * np.pi * normal_progress)
+                sine_variation = VOLATILITY_FACTOR * (normal_max - normal_min) * np.sin(4 * np.pi * normal_progress)
                 base_value += sine_variation
 
-            # NO RANDOMNESS - perfect predictability
+            # Add random volatility to break perfect predictability
+            if VOLATILITY_FACTOR > 0:
+                volatility_range = VOLATILITY_FACTOR * (peak_max - normal_min)
+                random_variation = np.random.uniform(-volatility_range/2, volatility_range/2)
+                base_value += random_variation
+
             final_load = max(1, round(base_value))
             request_rates.append(final_load)
             load_types.append(load_type)
@@ -177,36 +198,43 @@ class LoadTester:
             for s, r, t in zip(time_points, request_rates, load_types):
                 writer.writerow([s, r, t])
 
-        # Save a summary for the new seasonal pattern
+        # Save a summary for the new double-season pattern
         pattern_summary = {
             "SEASONAL_NORMAL": {
                 "count": load_types.count("SEASONAL_NORMAL"),
                 "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "SEASONAL_NORMAL"]), 2) if load_types.count("SEASONAL_NORMAL") else 0
             },
-            "SEASONAL_PEAK": {
-                "count": load_types.count("SEASONAL_PEAK"),
-                "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "SEASONAL_PEAK"]), 2) if load_types.count("SEASONAL_PEAK") else 0
+            "SEASONAL_PEAK_1": {
+                "count": load_types.count("SEASONAL_PEAK_1"),
+                "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "SEASONAL_PEAK_1"]), 2) if load_types.count("SEASONAL_PEAK_1") else 0
+            },
+            "SEASONAL_PEAK_2": {
+                "count": load_types.count("SEASONAL_PEAK_2"),
+                "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "SEASONAL_PEAK_2"]), 2) if load_types.count("SEASONAL_PEAK_2") else 0
             }
         }
         
         num_complete_seasons = self.duration // SEASON_DURATION
-        peak_seconds_per_season = PEAK_DURATION
-        normal_seconds_per_season = SEASON_DURATION - PEAK_DURATION
+        peak_seconds_per_season = PEAK_DURATION * 2  # Two peaks per season now
+        normal_seconds_per_season = SEASON_DURATION - (PEAK_DURATION * 2)
         
         with open(os.path.join(self.output_dir, "patterns", "pattern_summary.txt"), 'w') as f:
-            f.write("PERFECT SEASONAL TRAFFIC PATTERN\n")
-            f.write("================================\n\n")
-            f.write("🎯 OPTIMIZED FOR HOLT-WINTERS SUPERIORITY 🎯\n\n")
+            f.write("DOUBLE-SEASON VOLATILE TRAFFIC PATTERN\n")
+            f.write("====================================\n\n")
+            f.write("🎯 ENHANCED VOLATILITY FOR MODEL DIFFERENTIATION 🎯\n\n")
             f.write(f"Test Duration: {self.duration} seconds\n")
             f.write(f"Season Duration: {SEASON_DURATION} seconds (5 minutes)\n")
             f.write(f"Complete Seasons: {num_complete_seasons}\n")
-            f.write(f"Peak Start Offset: {PEAK_START_OFFSET} seconds (2 minutes into season)\n")
-            f.write(f"Peak Duration: {PEAK_DURATION} seconds (1 minute peak)\n")
+            f.write(f"First Peak: {PEAK_START_OFFSET}-{PEAK_START_OFFSET + PEAK_DURATION}s (1 minute into season)\n")
+            f.write(f"Second Peak: {SECOND_PEAK_OFFSET}-{SECOND_PEAK_OFFSET + PEAK_DURATION}s (3.5 minutes into season)\n")
+            f.write(f"Peak Duration: {PEAK_DURATION} seconds each\n")
             f.write(f"Normal Load: {NORMAL_LOAD_RANGE} req/sec\n")
             f.write(f"Peak Load: {PEAK_LOAD_RANGE} req/sec\n")
-            f.write(f"Volatility: {VOLATILITY_FACTOR} (ZERO randomness)\n\n")
-            f.write("PERFECT PREDICTABILITY FEATURES:\n")
-            f.write("- Identical timing every season\n")
+            f.write(f"Volatility: {VOLATILITY_FACTOR} (Enhanced randomness)\n\n")
+            f.write("ENHANCED VOLATILITY FEATURES:\n")
+            f.write("- Two peaks per 5-minute season\n")
+            f.write("- Quicker, less smooth transitions\n")
+            f.write("- Added randomness to break perfect predictability\n")
             f.write("- Identical intensity every season\n")
             f.write("- Identical duration every season\n")
             f.write("- Zero random variation\n")
@@ -220,7 +248,7 @@ class LoadTester:
             f.write(f"- Peak: {peak_seconds_per_season} seconds per season\n")
         self.save_pattern_chart(time_points, request_rates, load_types)
         logger.info("Generated PERFECT SEASONAL traffic pattern optimized for Holt-Winters")
-        logger.info(f"✅ {num_complete_seasons} identical seasons, each {SEASON_DURATION}s with peak at {PEAK_START_OFFSET}s")
+        logger.info(f"✅ {num_complete_seasons} double-peak seasons, each {SEASON_DURATION}s with peaks at {PEAK_START_OFFSET}s and {SECOND_PEAK_OFFSET}s")
         return rate_map
 
     def save_pattern_chart(self, time_points, request_rates, load_types):
