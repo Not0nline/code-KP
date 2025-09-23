@@ -386,7 +386,7 @@ def collect_single_metric_point():
 
 def should_retrain_gru(current_time):
     """Determine if GRU should be retrained based on paper criteria"""
-    global last_gru_retraining
+    global last_gru_retraining, is_model_trained, traffic_data
     
     # Never trained
     if not is_model_trained:
@@ -475,6 +475,7 @@ def make_prediction_with_model(model_name):
 
 def retrain_gru_model_async():
     """Asynchronous GRU retraining for update coroutine"""
+    global is_training, traffic_data
     try:
         if not is_training and len(traffic_data) >= MIN_DATA_POINTS_FOR_GRU:
             # Use sliding window of recent data for training
@@ -1350,6 +1351,7 @@ def calculate_enhanced_mse(model_name):
 
 def predict_with_ensemble(steps=1):
     """Ensemble prediction combining multiple models for best accuracy."""
+    global gru_model, is_model_trained
     try:
         predictions = {}
         weights = {}
@@ -1427,7 +1429,7 @@ def predict_with_ensemble(steps=1):
 
 def select_best_model_with_minheap():
     """MinHeap-based model selection using MSE as the primary criterion"""
-    global gru_mse, holt_winters_mse
+    global gru_mse, holt_winters_mse, is_model_trained, gru_model
     
     # Create a min heap with (MSE, model_name, model_ready_status)
     model_heap = []
@@ -2518,16 +2520,16 @@ def predict_with_gru(steps=None):
     if steps is None:
         steps = int(gru_config["look_forward"])
     
-        # Validate model availability
-        if gru_model is None or not is_model_trained:
-            logger.error(f"🚨 GRU PREDICTION BLOCKED: model={gru_model is not None}, trained={is_model_trained}")
-            return None
-        
-        # Use training dataset if collection is complete, otherwise use current data
-        prediction_data = training_dataset if data_collection_complete and training_dataset else traffic_data
-        
-        logger.info(f"🔄 GRU prediction starting: model_loaded={gru_model is not None}, data_points={len(prediction_data)}, using_training_data={data_collection_complete}")    
-        look_back = int(gru_config["look_back"])
+    # Validate model availability
+    if gru_model is None or not is_model_trained:
+        logger.error(f"🚨 GRU PREDICTION BLOCKED: model={gru_model is not None}, trained={is_model_trained}")
+        return None
+    
+    # Use training dataset if collection is complete, otherwise use current data
+    prediction_data = training_dataset if data_collection_complete and training_dataset else traffic_data
+    
+    logger.info(f"🔄 GRU prediction starting: model_loaded={gru_model is not None}, data_points={len(prediction_data)}, using_training_data={data_collection_complete}")    
+    look_back = int(gru_config["look_back"])
     
     if len(prediction_data) < look_back:
         logger.warning(f"Not enough data for GRU prediction: {len(prediction_data)} < {look_back}")
@@ -3988,6 +3990,7 @@ def debug_gru_deep_check():
 @app.route('/debug/force_emergency_predictions', methods=['POST'])
 def debug_force_emergency():
     """Force creation of emergency synthetic predictions for testing."""
+    global traffic_data
     try:
         if len(traffic_data) < 10:
             return jsonify({
@@ -4049,6 +4052,7 @@ def debug_enhanced_mse():
 @app.route('/debug/force_ensemble_prediction', methods=['POST'])
 def debug_force_ensemble():
     """Force creation of ensemble predictions for testing."""
+    global gru_model, is_model_trained
     try:
         if len(traffic_data) < 12:
             return jsonify({
