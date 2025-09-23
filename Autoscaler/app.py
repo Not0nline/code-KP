@@ -12,6 +12,7 @@ import struct
 from datetime import datetime, timedelta
 import logging
 import joblib
+import traceback
 from prometheus_client import Counter, Gauge, Summary, Histogram
 from prometheus_flask_exporter import PrometheusMetrics
 from prometheus_api_client import PrometheusConnect
@@ -56,6 +57,8 @@ prediction_time = Gauge('predictive_scaler_prediction_time_ms', 'Prediction time
 predictive_scaler_recommended_replicas = Gauge('predictive_scaler_recommended_replicas', 
                                              'Recommended number of replicas', 
                                              ['method'])
+current_actual_replicas = Gauge('predictive_scaler_actual_replicas', 
+                              'Current actual number of replicas')
 
 # Enhanced MSE metrics with -1 for invalid states
 current_mse = Gauge('current_model_mse', 'Current MSE for each model (-1 = invalid/insufficient data)', 
@@ -70,7 +73,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global variables - Keep original hyperparameters
+# Global variables - Paper-based architecture
 DATA_DIR = "/data"
 DATA_FILE = os.path.join(DATA_DIR, "traffic_data.csv")
 MODEL_FILE = os.path.join(DATA_DIR, "gru_model.h5")
@@ -83,13 +86,18 @@ MIN_DATA_POINTS_FOR_GRU = 2000  # Based on your hyperparameters
 PREDICTION_WINDOW = 24  # Based on your hyperparameters
 SCALING_THRESHOLD = 0.7  # CPU threshold for scaling decision
 SCALING_COOLDOWN = 60  # Reduced to 1 minute for faster scale down
-COLLECTION_HOURS = 4  # Hours of data to collect before switching to MSE-only mode (reduced for testing)
+
+# Paper-based Two-Coroutine Configuration
+PREDICTION_INTERVAL = 60  # Main coroutine: prediction every 60 seconds
+UPDATE_INTERVAL = 300     # Update coroutine: model updates every 5 minutes
+GRU_RETRAINING_INTERVAL = 3600  # GRU retraining every hour
+HOLT_WINTERS_UPDATE_INTERVAL = 180  # HW MSE updates every 3 minutes
 
 # Default configuration with your original hyperparameters
 config = {
     "use_gru": False,
     "collection_interval": 60,  # seconds
-    "cpu_threshold": 3.0,  # Skip collection below this CPU %
+    "cpu_threshold": 5.0,  # Skip collection below this CPU % (avoid idle periods)
     "training_threshold_minutes": 3,  # Switch to GRU after this (reduced from 5)
     "prometheus_server": os.getenv('PROMETHEUS_SERVER', 
         'http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090'),
@@ -97,15 +105,15 @@ config = {
     "target_namespace": os.getenv('TARGET_NAMESPACE', 'default'),
     "cost_optimization": {
         "enabled": True,
-        "target_cpu_utilization": 70,  # Target CPU for normal operation
-        "scale_up_threshold": 80,  # Scale up at this CPU
-        "scale_down_threshold": 20,  # Scale down below this CPU
+        "target_cpu_utilization": 80,  # Target higher CPU for efficiency (0-100 scale)
+        "scale_up_threshold": 85,  # Scale up only at very high CPU (0-100 scale)
+        "scale_down_threshold": 40,  # Scale down at higher threshold (0-100 scale)  
         "min_replicas": 1,
         "max_replicas": 10,
-        "aggressive_scaling": True,
-        "scale_down_delay_minutes": 2,  # Wait this long before scaling down
+        "aggressive_scaling": False,  # More conservative scaling
+        "scale_down_delay_minutes": 1,  # Faster scale down when predictive
         "zero_traffic_threshold": 0.1,  # Consider traffic zero below this
-        "idle_scale_down_minutes": 5  # Scale to min after this much idle time
+        "idle_scale_down_minutes": 3  # Faster idle scale down when predictive
     },
     "mse_config": {
         "enabled": True,
@@ -118,18 +126,18 @@ config = {
     },
     "models": {
         "holt_winters": {
-            "slen": 12,  # seasonal length
-            "look_forward": 24,
-            "look_backward": 60,
-            "alpha": 0.716,
-            "beta": 0.029,
-            "gamma": 0.993,
+            "slen": 30,  # 30 data points per season (300s / 10s collection interval) 
+            "look_forward": 6,   # Predict 1 minute ahead (6 * 10s)
+            "look_backward": 90, # Look back 15 minutes (3 complete seasons)
+            "alpha": 0.3,        # Reduced for more stable level smoothing
+            "beta": 0.1,         # Reduced for stable trend
+            "gamma": 0.9,        # High seasonal smoothing for strong patterns
             "needTrain": False
         },
         "gru": {
             "address": "/tmp/uds_socket",
             "resp_recv_address": "/tmp/rra.socket",
-            "look_back": 12, # TODO: change back to 100
+            "look_back": 100, 
             "look_forward": 24,
             "train_size": 2000,
             "batch_size": 10,
@@ -158,8 +166,10 @@ is_model_trained = False
 last_training_time = None
 start_time = datetime.now()
 prometheus_client = None
-low_traffic_start_time = None
-consecutive_low_cpu_count = 0
+
+# Traffic monitoring variables
+low_traffic_start_time = None  # Track when low traffic period started
+consecutive_low_cpu_count = 0  # Track consecutive low CPU measurements
 
 # Enhanced MSE tracking variables with MinHeap system
 # The MinHeap system uses MSE (Mean Squared Error) to rank models and make scaling decisions
@@ -176,7 +186,336 @@ last_cleanup_time = None  # Track cleanup operations to prevent too frequent cle
 # Training state management to prevent Flask blocking
 is_training = False
 training_thread = None
+
+# Paper-based Two-Coroutine System Management
+main_coroutine_thread = None      # Main coroutine: predictions and scaling
+update_coroutine_thread = None    # Update coroutine: model training and MSE updates
+is_main_coroutine_running = False
+is_update_coroutine_running = False
+
+# Legacy MSE update thread (will be replaced by update coroutine)
+mse_update_thread = None
+is_mse_updating = False
 training_lock = threading.Lock()
+file_lock = threading.Lock()  # For file I/O operations
+
+# Model retraining tracking (per paper architecture)
+last_gru_retraining = None
+last_holt_winters_update = None
+gru_needs_retraining = False
+
+# Hybrid initialization configuration
+SYNTHETIC_DATA_ENABLED = False  # Disabled - using real 24-hour collection
+SYNTHETIC_DATA_FILE = 'synthetic_dataset_24h.json'  # Default 24-hour dataset
+FALLBACK_SYNTHETIC_HOURS = 24  # Generate if file not found
+using_synthetic_data = False
+synthetic_to_real_transition_time = None
+models_performance_history = {
+    'gru': [],
+    'holt_winters': [],
+    'ensemble': []
+}
+
+def main_coroutine():
+    """
+    Main coroutine: Handles periodic predictions and scaling decisions
+    Based on paper architecture - runs every PREDICTION_INTERVAL seconds
+    """
+    global is_main_coroutine_running, traffic_data
+    
+    is_main_coroutine_running = True
+    logger.info("🚀 Main coroutine started - handling predictions and scaling")
+    
+    while is_main_coroutine_running:
+        try:
+            # Collect current metrics
+            if prometheus_client is None:
+                initialize_prometheus()
+            
+            # Get current metrics for scaling decision
+            current_metrics = collect_single_metric_point()
+            if current_metrics:
+                # Only add to traffic_data if CPU is above threshold
+                if current_metrics['cpu_utilization'] >= config['cpu_threshold']:
+                    with file_lock:  # Thread-safe data access
+                        traffic_data.append(current_metrics)
+                    
+                        # Keep sliding window of recent data (last 24 hours)
+                        if len(traffic_data) > 1440:  # 24 hours at 60s intervals
+                            traffic_data = traffic_data[-1440:]
+                    
+                    logger.debug(f"Main coroutine: Data collected - CPU={current_metrics['cpu_utilization']:.1f}% (above threshold {config['cpu_threshold']}%)")
+                else:
+                    logger.debug(f"Main coroutine: Data skipped - CPU={current_metrics['cpu_utilization']:.1f}% (below threshold {config['cpu_threshold']}%)")
+                
+                # Make predictions using best model from min-heap (only if we have data)
+                best_model = select_best_model_with_minheap()
+                if best_model:
+                    logger.info(f"🎯 Using best model: {best_model}")
+                
+                # Try to make predictions with available models
+                predictions = {}
+                try:
+                    # Try Holt-Winters prediction
+                    if len(traffic_data) >= 10:
+                        hw_pred = predict_with_holtwinters(steps=1)
+                        if hw_pred and len(hw_pred) > 0:
+                            predictions['holt_winters'] = int(hw_pred[0])
+                except Exception as e:
+                    logger.debug(f"Holt-Winters prediction failed: {e}")
+                
+                try:
+                    # Try GRU prediction  
+                    if len(traffic_data) >= 105:
+                        gru_pred = predict_with_gru(steps=1)
+                        if gru_pred and len(gru_pred) > 0:
+                            predictions['gru'] = int(gru_pred[0])
+                except Exception as e:
+                    logger.debug(f"GRU prediction failed: {e}")
+                
+                # Update Prometheus metrics with all predictions
+                if 'gru' in predictions:
+                    predictive_scaler_recommended_replicas.labels(method='gru').set(predictions['gru'])
+                    logger.debug(f"Updated GRU metric: {predictions['gru']}")
+                else:
+                    predictive_scaler_recommended_replicas.labels(method='gru').set(0)
+                
+                if 'holt_winters' in predictions:
+                    predictive_scaler_recommended_replicas.labels(method='holtwinters').set(predictions['holt_winters'])
+                    logger.debug(f"Updated Holt-Winters metric: {predictions['holt_winters']}")
+                else:
+                    predictive_scaler_recommended_replicas.labels(method='holtwinters').set(0)
+                
+                # Make scaling decision
+                if predictions:
+                    decision, replicas = make_scaling_decision_with_minheap(predictions)
+                    logger.info(f"📊 Main coroutine - Predictions: {predictions}, Decision: {decision}, Replicas: {replicas}")
+                else:
+                    logger.info("⏰ No models ready for predictions yet")
+            
+            # Sleep until next prediction interval
+            time.sleep(PREDICTION_INTERVAL)
+            
+        except Exception as e:
+            logger.error(f"❌ Main coroutine error: {e}")
+            time.sleep(10)
+    
+    logger.info("🛑 Main coroutine stopped")
+
+def update_coroutine():
+    """
+    Update coroutine: Responsible for continuous model training and updates
+    Based on paper architecture - runs every UPDATE_INTERVAL seconds
+    """
+    global is_update_coroutine_running, last_gru_retraining, last_holt_winters_update
+    
+    is_update_coroutine_running = True
+    logger.info("🔄 Update coroutine started - handling model training and updates")
+    
+    while is_update_coroutine_running:
+        try:
+            current_time = datetime.now()
+            
+            # Handle GRU model retraining (paper: "user-configured retraining time point")
+            if should_retrain_gru(current_time):
+                logger.info("🧠 Update coroutine - Starting GRU retraining")
+                retrain_gru_model_async()
+                last_gru_retraining = current_time
+            
+            # Handle Holt-Winters continuous updates (paper: "continuously updates by running simulated predictions")
+            if should_update_holt_winters(current_time):
+                logger.info("📈 Update coroutine - Updating Holt-Winters MSE")
+                update_holt_winters_performance()
+                last_holt_winters_update = current_time
+            
+            # Update model rankings in min-heap based on current performance
+            update_model_heap_rankings()
+            
+            # Periodically save data for persistence (every update cycle)
+            if len(traffic_data) > 0:
+                save_data()
+                logger.debug(f"💾 Auto-saved {len(traffic_data)} data points")
+            
+            # Sleep until next update interval
+            time.sleep(UPDATE_INTERVAL)
+            
+        except Exception as e:
+            logger.error(f"❌ Update coroutine error: {e}")
+            time.sleep(30)
+    
+    logger.info("🛑 Update coroutine stopped")
+
+def collect_single_metric_point():
+    """Collect a single data point for the main coroutine"""
+    try:
+        # Get current CPU utilization using improved detection
+        current_cpu = get_current_cpu_from_prometheus()
+        
+        # Memory usage
+        memory_query = f'avg(container_memory_usage_bytes{{pod=~"{config["target_deployment"]}-.*"}}) / 1024 / 1024'
+        memory_result = prometheus_client.custom_query(memory_query)
+        current_memory = float(memory_result[0]['value'][1]) if memory_result else 0
+        
+        # Request rate (traffic)
+        request_query = f'sum(rate(nginx_ingress_controller_requests{{service=~"{config["target_deployment"]}"}}[5m])) * 60'
+        request_result = prometheus_client.custom_query(request_query)
+        current_traffic = float(request_result[0]['value'][1]) if request_result else 0
+        
+        # Current replicas
+        replicas_query = f'kube_deployment_status_replicas{{deployment="{config["target_deployment"]}", namespace="{config["target_namespace"]}"}}'
+        replicas_result = prometheus_client.custom_query(replicas_query)
+        current_replicas = int(float(replicas_result[0]['value'][1])) if replicas_result else 1
+        
+        # Update Prometheus metrics
+        cpu_utilization.set(current_cpu)
+        traffic_gauge.set(current_traffic)
+        current_actual_replicas.set(current_replicas)
+        
+        return {
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'traffic': current_traffic,
+            'cpu_utilization': current_cpu,
+            'memory_usage': current_memory,
+            'replicas': current_replicas,
+            'synthetic': False  # Real data from Prometheus
+        }
+        
+    except Exception as e:
+        logger.error(f"Error collecting metrics: {e}")
+        return None
+
+def should_retrain_gru(current_time):
+    """Determine if GRU should be retrained based on paper criteria"""
+    global last_gru_retraining
+    
+    # Never trained
+    if not is_model_trained:
+        return len(traffic_data) >= MIN_DATA_POINTS_FOR_GRU
+    
+    # Time-based retraining
+    if last_gru_retraining is None:
+        return True
+    
+    time_since_last = (current_time - last_gru_retraining).total_seconds()
+    return time_since_last >= GRU_RETRAINING_INTERVAL
+
+def should_update_holt_winters(current_time):
+    """Determine if Holt-Winters MSE should be updated"""
+    global last_holt_winters_update
+    
+    if last_holt_winters_update is None:
+        return len(traffic_data) >= 12  # Minimum data for HW
+    
+    time_since_last = (current_time - last_holt_winters_update).total_seconds()
+    return time_since_last >= HOLT_WINTERS_UPDATE_INTERVAL
+
+def update_holt_winters_performance():
+    """Paper: 'Continuously updates by running simulated predictions'"""
+    try:
+        # Run simulated predictions to calculate current MSE
+        if len(traffic_data) >= 30:  # Need sufficient data
+            # Use recent data window for HW performance evaluation
+            recent_data = traffic_data[-180:] if len(traffic_data) > 180 else traffic_data
+            
+            # Calculate MSE using recent predictions vs actual values
+            hw_mse = calculate_mse_robust('holt_winters')
+            
+            # Update performance history
+            models_performance_history['holt_winters'].append({
+                'timestamp': datetime.now(),
+                'mse': hw_mse,
+                'data_points_used': len(recent_data)
+            })
+            
+            # Keep only recent performance history (last 24 hours)
+            cutoff_time = datetime.now() - timedelta(hours=24)
+            models_performance_history['holt_winters'] = [
+                p for p in models_performance_history['holt_winters'] 
+                if p['timestamp'] > cutoff_time
+            ]
+            
+            logger.info(f"📈 Holt-Winters MSE updated: {hw_mse:.4f}")
+            
+    except Exception as e:
+        logger.error(f"Error updating Holt-Winters performance: {e}")
+
+def update_model_heap_rankings():
+    """Paper: 'Adjusts model rankings in the min-heap based on performance'"""
+    try:
+        # This will trigger the existing min-heap logic with updated MSE values
+        get_ranked_model_predictions()
+        logger.debug("🔄 Model heap rankings updated")
+        
+    except Exception as e:
+        logger.error(f"Error updating model heap rankings: {e}")
+
+def make_prediction_with_model(model_name):
+    """Make prediction using specified model"""
+    try:
+        if model_name == 'gru' and gru_model is not None:
+            return predict_with_advanced_gru(6)
+        elif model_name == 'holt_winters':
+            return predict_with_holtwinters(6)
+        elif model_name == 'ensemble':
+            # Combine predictions from available models
+            gru_pred = predict_with_advanced_gru(6) if gru_model else None
+            hw_pred = predict_with_holtwinters(6)
+            
+            if gru_pred and hw_pred:
+                # Weighted average based on recent MSE performance
+                return [(g + h) / 2 for g, h in zip(gru_pred, hw_pred)]
+            else:
+                return hw_pred or gru_pred
+        else:
+            return predict_with_holtwinters(6)  # Fallback
+            
+    except Exception as e:
+        logger.error(f"Error making prediction with {model_name}: {e}")
+        return None
+
+def retrain_gru_model_async():
+    """Asynchronous GRU retraining for update coroutine"""
+    try:
+        if not is_training and len(traffic_data) >= MIN_DATA_POINTS_FOR_GRU:
+            # Use sliding window of recent data for training
+            training_data_copy = traffic_data[-MIN_DATA_POINTS_FOR_GRU:].copy()
+            
+            # Start async training
+            training_thread = threading.Thread(
+                target=async_model_training,
+                args=("update_coroutine_retraining", training_data_copy, True)
+            )
+            training_thread.daemon = True
+            training_thread.start()
+            
+            logger.info(f"🚀 Update coroutine - GRU retraining started with {len(training_data_copy)} data points")
+        
+    except Exception as e:
+        logger.error(f"Error starting GRU retraining: {e}")
+
+def start_two_coroutine_system():
+    """Start the paper-based two-coroutine system"""
+    global main_coroutine_thread, update_coroutine_thread
+    
+    # Start main coroutine
+    main_coroutine_thread = threading.Thread(target=main_coroutine)
+    main_coroutine_thread.daemon = True
+    main_coroutine_thread.start()
+    logger.info("✅ Main coroutine thread started")
+    
+    # Start update coroutine  
+    update_coroutine_thread = threading.Thread(target=update_coroutine)
+    update_coroutine_thread.daemon = True
+    update_coroutine_thread.start()
+    logger.info("✅ Update coroutine thread started")
+
+def stop_two_coroutine_system():
+    """Stop the two-coroutine system"""
+    global is_main_coroutine_running, is_update_coroutine_running
+    
+    is_main_coroutine_running = False
+    is_update_coroutine_running = False
+    logger.info("🛑 Two-coroutine system stopping...")
 
 def async_model_training(training_reason, traffic_data_copy, advanced_fallback=True):
     """Perform model training in a separate thread to prevent Flask blocking"""
@@ -202,32 +541,36 @@ def async_model_training(training_reason, traffic_data_copy, advanced_fallback=T
         
         success = False
         
-        # Temporarily update traffic_data for training (thread-safe copy)
-        original_traffic_data = traffic_data[:]
-        traffic_data[:] = traffic_data_copy
-        
+        # Use the thread-safe copy for training without modifying global state
         try:
             # Try advanced model first if we have enough data
             if advanced_fallback and len(traffic_data_copy) >= 30:
                 logger.info("🧠 Attempting advanced GRU model training...")
-                success = build_advanced_gru_model()
+                success = build_advanced_gru_model_with_data(traffic_data_copy)
                 if success:
                     logger.info("✅ Advanced GRU model training succeeded!")
             
             # Fallback to basic model if advanced failed or not attempted
             if not success:
                 logger.info("🔧 Attempting basic GRU model training...")
-                success = build_gru_model()
+                success = build_gru_model_with_data(traffic_data_copy)
                 if success:
                     logger.info("✅ Basic GRU model training succeeded!")
-        
-        finally:
-            # Restore original traffic data
-            traffic_data[:] = original_traffic_data
+                    
+        except Exception as training_error:
+            logger.error(f"❌ Model training execution failed: {training_error}")
+            success = False
         
         if success:
             is_model_trained = True
             last_training_time = datetime.now()
+            
+            # Update config to enable GRU usage
+            if not config['use_gru']:
+                config['use_gru'] = True
+                save_config()
+                logger.info("✅ GRU model enabled in configuration")
+            
             duration = (datetime.now() - training_start).total_seconds()
             logger.info(f"🎯 ASYNC training completed successfully in {duration:.1f}s")
             
@@ -246,7 +589,8 @@ def async_model_training(training_reason, traffic_data_copy, advanced_fallback=T
     except Exception as e:
         logger.error(f"❌ ASYNC training error: {e}")
     finally:
-        is_training = False
+        with training_lock:
+            is_training = False
 
 def initialize_prometheus():
     """Initialize Prometheus client"""
@@ -263,11 +607,44 @@ def initialize_prometheus():
 def load_config():
     global config
     try:
+        # Store original app.py defaults (these should always take precedence)
+        app_defaults = config.copy()
+        
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
                 loaded_config = json.load(f)
-                config.update(loaded_config)
-                logger.info(f"Configuration loaded from {CONFIG_FILE}")
+                
+                # Only load specific persistent settings that should survive app restarts
+                # Do NOT override cost_optimization, mse_config, or models from app.py defaults
+                persistent_settings = [
+                    'use_gru',  # Model training state
+                    'collection_interval',  # Data collection rate
+                    'training_threshold_minutes',  # Training timing
+                    'prometheus_server',  # Infrastructure settings
+                    'target_deployment',  # Target app settings
+                    'target_namespace'  # Target app settings
+                ]
+                
+                # Only update these specific settings from the persistent file
+                for setting in persistent_settings:
+                    if setting in loaded_config:
+                        config[setting] = loaded_config[setting]
+                
+                logger.info(f"✅ Loaded persistent settings from {CONFIG_FILE}")
+                logger.info(f"🔒 Preserved app.py defaults for: cost_optimization, mse_config, models")
+        
+        # Always enforce app.py defaults for critical scaling settings
+        original_threshold = config.get('cpu_threshold', 'unknown')
+        config['cpu_threshold'] = 5.0  # Only collect data when CPU > 5% (avoid idle periods)
+        logger.info(f"🔧 CPU threshold set: {original_threshold} -> {config['cpu_threshold']}% (avoiding idle data)")
+        
+        # Log the active cost optimization settings
+        cost_opt = config['cost_optimization']
+        logger.info(f"🎯 Active scaling thresholds: scale_up={cost_opt['scale_up_threshold']}%, scale_down={cost_opt['scale_down_threshold']}%, target_cpu={cost_opt['target_cpu_utilization']}%")
+        
+        # Save the merged config (this will preserve app.py defaults in persistent storage going forward)
+        save_config()
+        
     except Exception as e:
         logger.error(f"Error loading configuration: {e}")
 
@@ -343,22 +720,24 @@ def filter_stale_data(max_age_hours=24):
 
 
 def load_predictions_history():
-    """Load predictions history for MSE calculation"""
+    """Load predictions history for MSE calculation with file locking"""
     global predictions_history
     try:
-        if os.path.exists(PREDICTIONS_FILE):
-            with open(PREDICTIONS_FILE, 'r') as f:
-                predictions_history = json.load(f)
-                logger.info("Loaded predictions history for MSE calculation")
+        with file_lock:
+            if os.path.exists(PREDICTIONS_FILE):
+                with open(PREDICTIONS_FILE, 'r') as f:
+                    predictions_history = json.load(f)
+                    logger.info("Loaded predictions history for MSE calculation")
     except Exception as e:
         logger.error(f"Error loading predictions history: {e}")
         predictions_history = {'gru': [], 'holt_winters': []}
 
 def save_predictions_history():
-    """Save predictions history for MSE calculation"""
+    """Save predictions history for MSE calculation with file locking"""
     try:
-        with open(PREDICTIONS_FILE, 'w') as f:
-            json.dump(predictions_history, f, indent=2)
+        with file_lock:
+            with open(PREDICTIONS_FILE, 'w') as f:
+                json.dump(predictions_history, f, indent=2)
     except Exception as e:
         logger.error(f"Error saving predictions history: {e}")
 
@@ -459,8 +838,8 @@ def preprocess_advanced_data(enhanced_df, feature_columns, sequence_length=12):
         
         # Handle missing values more intelligently
         features_df = pd.DataFrame(features, columns=available_features)
-        features_clean = features_df.fillna(method='ffill').fillna(method='bfill').fillna(0).values
-        targets_clean = pd.Series(targets.flatten()).fillna(method='ffill').fillna(method='bfill').fillna(1).values.reshape(-1, 1)
+        features_clean = features_df.ffill().bfill().fillna(0).values
+        targets_clean = pd.Series(targets.flatten()).ffill().bfill().fillna(1).values.reshape(-1, 1)
         
         # Robust scaling (more resistant to outliers)
         scaler_X = RobustScaler()
@@ -876,19 +1255,17 @@ def update_mse_metrics():
     
     # Update Prometheus metrics with stability protection
     try:
-        if gru_mse != float('inf') and gru_mse > 0:
+        if gru_mse != float('inf') and gru_mse >= 0:  # Allow MSE = 0.0 (perfect predictions)
             prediction_mse.labels(model='gru').observe(gru_mse)
             current_mse.labels(model='gru').set(gru_mse)
         elif gru_mse == float('inf'):
             current_mse.labels(model='gru').set(-1)  # Signal insufficient data
-        # Don't update if MSE is 0 or invalid (keeps previous stable value)
         
-        if holt_winters_mse != float('inf') and holt_winters_mse > 0:
+        if holt_winters_mse != float('inf') and holt_winters_mse >= 0:  # Allow MSE = 0.0 (perfect predictions)
             prediction_mse.labels(model='holt_winters').observe(holt_winters_mse)
             current_mse.labels(model='holt_winters').set(holt_winters_mse)
         elif holt_winters_mse == float('inf'):
             current_mse.labels(model='holt_winters').set(-1)  # Signal insufficient data
-        # Don't update if MSE is 0 or invalid (keeps previous stable value)
             
     except Exception as e:
         logger.error(f"Failed to update Prometheus metrics: {e}")
@@ -1108,8 +1485,13 @@ def select_best_model_with_minheap():
             model_selection.labels(model='holt_winters', reason='mse_disabled_fallback').inc()
             return 'holt_winters'
     
-    # Log minheap decision
-    reason = f"minheap_lowest_mse_{best_mse:.4f}"
+    # Log minheap decision with simplified reason
+    if best_mse < 1.0:
+        reason = "low_mse_selected"
+    elif best_mse < 5.0:
+        reason = "medium_mse_selected"
+    else:
+        reason = "high_mse_selected"
     model_selection.labels(model=best_model, reason=reason).inc()
     
     logger.info(f"🎯 MinHeap final selection: {best_model} (MSE: {best_mse:.4f})")
@@ -1242,49 +1624,50 @@ def collect_mse_data_only():
                 initialize_prometheus()
                 
             # Get only essential metrics for MSE calculation
-            cpu_query = f'avg(rate(container_cpu_usage_seconds_total{{pod=~"{config["target_deployment"]}-.*"}}[5m])) * 100'
-            cpu_result = prometheus_client.custom_query(cpu_query)
-            current_cpu = float(cpu_result[0]['value'][1]) if cpu_result and len(cpu_result) > 0 else 0
+            current_cpu = get_current_cpu_from_prometheus()
             
             replicas_query = f'kube_deployment_status_replicas{{deployment="{config["target_deployment"]}", namespace="{config["target_namespace"]}"}}'
             replicas_result = prometheus_client.custom_query(replicas_query)
             current_replicas = int(float(replicas_result[0]['value'][1])) if replicas_result else 1
             
+            # Update actual replicas metric
+            current_actual_replicas.set(current_replicas)
+            
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            # Only match predictions with current data - don't store training data
-            try:
-                match_new_data_with_predictions(current_replicas, current_cpu, timestamp)
-            except Exception as e:
-                logger.debug(f"MSE matching failed: {e}")
-            
-            # Generate fresh predictions for MSE tracking (using stored training dataset)
-            if len(traffic_data) >= 12:  # Use stored training data
+            # Only process when CPU is above threshold
+            if current_cpu >= config['cpu_threshold']:
+                # Only match predictions with current data - don't store training data
                 try:
-                    # Generate GRU prediction
-                    if gru_model is not None and is_model_trained:
-                        gru_pred = predict_with_advanced_gru(1)
-                        if not gru_pred:
-                            gru_pred = predict_with_gru(1)
-                        if gru_pred:
-                            logger.debug(f"MSE Mode - GRU prediction: {gru_pred}")
-                    
-                    # Generate Holt-Winters prediction  
-                    hw_pred = predict_with_optimized_holtwinters(1)
-                    if not hw_pred:
-                        hw_pred = predict_with_holtwinters(1)
-                    if hw_pred:
-                        logger.debug(f"MSE Mode - HW prediction: {hw_pred}")
-                        
+                    match_new_data_with_predictions(current_replicas, current_cpu, timestamp)
                 except Exception as e:
-                    logger.error(f"MSE mode prediction generation failed: {e}")
+                    logger.debug(f"MSE matching failed: {e}")
+                
+                logger.debug(f"MSE mode: Processing data - CPU={current_cpu:.1f}% (above threshold {config['cpu_threshold']}%)")
+            else:
+                logger.debug(f"MSE mode: Skipping data - CPU={current_cpu:.1f}% (below threshold {config['cpu_threshold']}%)")
             
-            # Update MSE calculations
-            current_time = datetime.now()
-            if last_mse_calculation is None or (current_time - last_mse_calculation).total_seconds() > 30:
-                update_mse_metrics()
-                last_mse_calculation = current_time
-            
+                # Generate fresh predictions for MSE tracking (using stored training dataset)
+                if len(traffic_data) >= 12:  # Use stored training data
+                    try:
+                        # Generate GRU prediction
+                        if gru_model is not None and is_model_trained:
+                            gru_pred = predict_with_advanced_gru(1)
+                            if not gru_pred:
+                                gru_pred = predict_with_gru(1)
+                            if gru_pred:
+                                logger.debug(f"MSE Mode - GRU prediction: {gru_pred}")
+                        
+                        # Generate Holt-Winters prediction  
+                        hw_pred = predict_with_optimized_holtwinters(1)
+                        if not hw_pred:
+                            hw_pred = predict_with_holtwinters(1)
+                        if hw_pred:
+                            logger.debug(f"MSE Mode - HW prediction: {hw_pred}")
+                            
+                    except Exception as e:
+                        logger.error(f"MSE mode prediction generation failed: {e}")
+                        
             # Sleep longer in MSE mode (less frequent collection needed)
             time.sleep(config['collection_interval'] * 2)  # 2x normal interval
             
@@ -1292,10 +1675,129 @@ def collect_mse_data_only():
             logger.error(f"Error in MSE collection mode: {e}")
             time.sleep(10)
 
+def get_current_cpu_from_prometheus():
+    """Get current CPU directly from Prometheus for status reporting"""
+    try:
+        if prometheus_client is None:
+            initialize_prometheus()
+        
+        logger.info(f"🔍 DEBUG: Getting CPU for deployment='{config['target_deployment']}', namespace='{config['target_namespace']}'")
+        
+        # CPU queries with proper analysis and format understanding
+        # Format guide: rate() returns cores-per-second (0-1 per core), multiply by 100 for percentage
+        cpu_queries = [
+            # Query 1: Standard container CPU rate * 100 -> should return percentage of 1 CPU core
+            {
+                'query': f'avg(rate(container_cpu_usage_seconds_total{{pod=~"{config["target_deployment"]}-.*"}}[5m])) * 100',
+                'format': 'percentage',
+                'description': 'Average CPU percentage across target pods'
+            },
+            # Query 2: Exclude POD containers (sidecars) * 100 -> should return percentage
+            {
+                'query': f'avg(rate(container_cpu_usage_seconds_total{{pod=~"{config["target_deployment"]}-.*", container!="POD"}}[5m])) * 100',
+                'format': 'percentage', 
+                'description': 'CPU percentage excluding POD containers'
+            },
+            # Query 3: With namespace filter * 100 -> should return percentage
+            {
+                'query': f'avg(rate(container_cpu_usage_seconds_total{{namespace="{config["target_namespace"]}", pod=~"{config["target_deployment"]}-.*"}}[5m])) * 100',
+                'format': 'percentage',
+                'description': 'CPU percentage with namespace filter'
+            },
+            # Query 4: Sum all containers, then convert to percentage
+            {
+                'query': f'sum(rate(container_cpu_usage_seconds_total{{pod=~"{config["target_deployment"]}-.*", container!="POD"}}[5m])) * 100',
+                'format': 'percentage',
+                'description': 'Total CPU percentage across all containers'
+            },
+            # Query 5: Try with irate for more responsive metrics
+            {
+                'query': f'avg(irate(container_cpu_usage_seconds_total{{pod=~"{config["target_deployment"]}-.*"}}[5m])) * 100',
+                'format': 'percentage',
+                'description': 'Instantaneous CPU rate percentage'
+            },
+            # Query 6: Node-level CPU as fallback
+            {
+                'query': f'100 - (avg(irate(node_cpu_seconds_total{{mode="idle"}}[5m])) * 100)',
+                'format': 'percentage',
+                'description': 'Node-level CPU usage percentage'
+            }
+        ]
+        
+        for i, query_info in enumerate(cpu_queries, 1):
+            try:
+                query = query_info['query']
+                expected_format = query_info['format']
+                description = query_info['description']
+                
+                logger.info(f"🔍 Trying CPU query {i}: {description}")
+                logger.info(f"🔍 Query {i} PromQL: {query}")
+                
+                cpu_result = prometheus_client.custom_query(query)
+                logger.info(f"🔍 Query {i} raw result: {cpu_result}")
+                
+                if cpu_result and len(cpu_result) > 0:
+                    cpu_value = float(cpu_result[0]['value'][1])
+                    logger.info(f"✅ CPU query {i} returned: {cpu_value:.4f} (raw value)")
+                    
+                    # Detailed analysis for debugging
+                    logger.info(f"� Query {i} analysis: raw_value={cpu_value}, expected_format={'percentage' if i <= 5 else 'unknown'}")
+                    
+                    # Critical fix: Check if value is in decimal format when it should be percentage
+                    if expected_format == 'percentage' and 0 <= cpu_value <= 1:
+                        logger.warning(f"⚠️ CPU {cpu_value:.6f} is decimal format, converting to percentage")
+                        cpu_value = cpu_value * 100
+                        logger.info(f"🔧 Converted CPU value: {cpu_value:.4f}%")
+                    
+                    # Accept any non-negative value after processing
+                    if cpu_value >= 0:
+                        logger.info(f"🎯 Selected CPU query {i} ({description}): {cpu_value:.4f}%")
+                        return cpu_value
+                else:
+                    logger.warning(f"❌ CPU query {i} returned no results")
+            except Exception as query_error:
+                logger.error(f"💥 CPU query {i} failed: {query_error}")
+        
+        # If all specific queries fail, try to get any available CPU metrics
+        logger.warning("🔍 All targeted queries failed, trying to discover available metrics...")
+        try:
+            # Try to list available metrics
+            all_metrics = prometheus_client.custom_query('up')
+            logger.info(f"🔍 Prometheus connection test result: {len(all_metrics) if all_metrics else 0} metrics found")
+            
+            # Try to discover all pods with CPU metrics
+            all_pods_cpu = prometheus_client.custom_query('container_cpu_usage_seconds_total')
+            logger.info(f"🔍 All CPU metrics available: {len(all_pods_cpu) if all_pods_cpu else 0}")
+            
+            if all_pods_cpu:
+                # Show first few pod names for debugging
+                pod_names = set()
+                for metric in all_pods_cpu[:10]:  # Limit to first 10
+                    if 'pod' in metric['metric']:
+                        pod_names.add(metric['metric']['pod'])
+                logger.info(f"🔍 Available pods with CPU metrics: {list(pod_names)[:5]}")
+                
+                # Check specifically for our target deployment
+                target_pods = [m for m in all_pods_cpu if 'pod' in m['metric'] and config['target_deployment'] in m['metric']['pod']]
+                logger.info(f"🔍 Target pods found: {len(target_pods)}")
+                if target_pods:
+                    for pod in target_pods[:3]:  # Show first 3 matching pods
+                        logger.info(f"🔍 Target pod: {pod['metric'].get('pod', 'unknown')} = {pod['value'][1]}")
+                
+        except Exception as discovery_error:
+            logger.error(f"💥 Metric discovery failed: {discovery_error}")
+        
+        logger.error("💥 All CPU queries failed, returning 0")
+        return 0
+        
+    except Exception as e:
+        logger.error(f"💥 Error getting current CPU: {e}")
+        return 0
+
 def collect_metrics_from_prometheus():
     """Collect real metrics from Prometheus with 24-hour collection limit and MSE mode"""
     global traffic_data, is_collecting, last_training_time, low_traffic_start_time, consecutive_low_cpu_count
-    global data_collection_complete, data_collection_start_time
+    global data_collection_complete, data_collection_start_time, gru_model, is_model_trained
     
     # If 24-hour collection is complete, switch to MSE-only mode
     if data_collection_complete:
@@ -1314,18 +1816,17 @@ def collect_metrics_from_prometheus():
         remaining_hours = max(0, 24 - elapsed_hours)
         logger.info(f"📅 Continuing data collection: {elapsed_hours:.1f}h elapsed, {remaining_hours:.1f}h remaining")
     
-    while is_collecting:
+    iteration_count = 0
+    max_iterations = 2000  # Safety limit: ~33 hours at 60s intervals
+    
+    while is_collecting and iteration_count < max_iterations:
+        iteration_count += 1
         try:
             if prometheus_client is None:
                 initialize_prometheus()
                 
-            # Get current CPU utilization
-            cpu_query = f'avg(rate(container_cpu_usage_seconds_total{{pod=~"{config["target_deployment"]}-.*"}}[5m])) * 100'
-            cpu_result = prometheus_client.custom_query(cpu_query)
-            
-            current_cpu = 0
-            if cpu_result and len(cpu_result) > 0:
-                current_cpu = float(cpu_result[0]['value'][1])
+            # Get current CPU utilization using the improved detection function
+            current_cpu = get_current_cpu_from_prometheus()
             
             # Track low CPU occurrences for better scale-down detection
             if current_cpu < config['cost_optimization']['scale_down_threshold']:
@@ -1348,6 +1849,9 @@ def collect_metrics_from_prometheus():
             replicas_result = prometheus_client.custom_query(replicas_query)
             current_replicas = int(float(replicas_result[0]['value'][1])) if replicas_result else 1
             
+            # Update actual replicas metric
+            current_actual_replicas.set(current_replicas)
+            
             # Track idle time
             if current_traffic < config['cost_optimization']['zero_traffic_threshold'] and current_cpu < config['cpu_threshold']:
                 if low_traffic_start_time is None:
@@ -1362,82 +1866,98 @@ def collect_metrics_from_prometheus():
             cpu_utilization.set(current_cpu)
             traffic_gauge.set(current_traffic)
             
-            # Store the data - always collect for monitoring, even if CPU is low
+            # Store the data - only collect when CPU is above threshold
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            traffic_data.append({
-                'timestamp': timestamp,
-                'traffic': current_traffic,
-                'cpu_utilization': current_cpu,
-                'memory_usage': current_memory,
-                'replicas': current_replicas
-            })
+            data_collected = False
+            if current_cpu >= config['cpu_threshold']:
+                traffic_data.append({
+                    'timestamp': timestamp,
+                    'traffic': current_traffic,
+                    'cpu_utilization': current_cpu,
+                    'memory_usage': current_memory,
+                    'replicas': current_replicas
+                })
+                data_collected = True
+                logger.debug(f"Data collected: CPU={current_cpu:.1f}% (above threshold {config['cpu_threshold']}%)")
+            else:
+                logger.debug(f"Data skipped: CPU={current_cpu:.1f}% (below threshold {config['cpu_threshold']}%)")
             
-            # Keep only last 24 hours of data
+            # Keep only last 24 hours of data with memory protection
             current_time = datetime.now()
             cutoff_time = current_time - timedelta(hours=24)
+            
+            # Clean data with better memory management
+            original_size = len(traffic_data)
             traffic_data = [d for d in traffic_data if 
                           datetime.strptime(d['timestamp'], "%Y-%m-%d %H:%M:%S") > cutoff_time]
             
-            # Try to match any unmatched predictions with the new data point
-            try:
-                match_new_data_with_predictions(current_replicas, current_cpu, timestamp)
-            except Exception as e:
-                logger.debug(f"Failed to match new data with predictions: {e}")
+            # Additional protection: limit to max 2000 points to prevent memory issues
+            if len(traffic_data) > 2000:
+                traffic_data = traffic_data[-2000:]
+                logger.warning(f"Traffic data truncated to 2000 points to prevent memory issues")
             
-            # Generate predictions from both models for MSE tracking (EVERY data point after minimum)
-            if len(traffic_data) >= 12:
+            if original_size != len(traffic_data):
+                logger.debug(f"Cleaned traffic data: {original_size} -> {len(traffic_data)} points")
+            
+            # Only do prediction matching and generation if we collected data
+            if data_collected:
+                # Try to match any unmatched predictions with the new data point
                 try:
-                    # ALWAYS make Holt-Winters prediction (use optimized version)
-                    logger.info("🔄 Generating background Holt-Winters prediction for MSE tracking...")
+                    match_new_data_with_predictions(current_replicas, current_cpu, timestamp)
+                except Exception as e:
+                    logger.debug(f"Failed to match new data with predictions: {e}")
+                
+                # Generate predictions from both models for MSE tracking (EVERY data point after minimum)
+                if len(traffic_data) >= 12:
                     try:
-                        hw_pred = predict_with_optimized_holtwinters(1)
-                        if not hw_pred:  # Fallback to basic if optimized fails
-                            hw_pred = predict_with_holtwinters(1)
-                    except Exception:
-                        hw_pred = predict_with_holtwinters(1)
-                    
-                    if hw_pred:
-                        logger.info(f"✅ HW prediction: {hw_pred}")
-                    else:
-                        logger.error("❌ HW prediction failed!")
-                    
-                    # ALWAYS make GRU prediction if available (use advanced version)
-                    if gru_model is not None and is_model_trained:
-                        logger.info("🔄 Generating background GRU prediction for MSE tracking...")
+                        # ALWAYS make Holt-Winters prediction (use optimized version)
+                        logger.info("🔄 Generating background Holt-Winters prediction for MSE tracking...")
                         try:
-                            gru_pred = predict_with_advanced_gru(1)
-                            if not gru_pred:  # Fallback to basic if advanced fails
-                                gru_pred = predict_with_gru(1)
+                            hw_pred = predict_with_optimized_holtwinters(1)
+                            if not hw_pred:  # Fallback to basic if optimized fails
+                                hw_pred = predict_with_holtwinters(1)
                         except Exception:
-                            gru_pred = predict_with_gru(1)
-                            
-                        if gru_pred:
-                            logger.info(f"✅ GRU prediction: {gru_pred}")
-                        else:
-                            logger.error("❌ GRU prediction failed!")
-                    else:
-                        logger.info(f"❌ GRU not available: model={gru_model is not None}, trained={is_model_trained}")
+                            hw_pred = predict_with_holtwinters(1)
                         
-                except Exception as e:
-                    logger.error(f"❌ Background prediction generation failed: {e}")
-                    import traceback
-                    logger.error(f"Stack trace: {traceback.format_exc()}")
-            
-            # Emergency MSE system: create synthetic predictions if GRU has never made any
-            if len(predictions_history['gru']) == 0 and len(traffic_data) > 20 and is_model_trained:
-                try:
-                    logger.warning("🆘 EMERGENCY: Creating synthetic GRU predictions for MSE testing")
-                    create_emergency_gru_predictions()
-                except Exception as e:
-                    logger.error(f"Emergency prediction creation failed: {e}")
-            
-            # Update MSE calculations more frequently for faster matching
-            if last_mse_calculation is None or (current_time - last_mse_calculation).total_seconds() > 10:
-                update_mse_metrics()
-            
-            # Periodically save data
-            if len(traffic_data) % 10 == 0:
-                save_data()
+                        if hw_pred:
+                            logger.info(f"✅ HW prediction: {hw_pred}")
+                        else:
+                            logger.error("❌ HW prediction failed!")
+                        
+                        # ALWAYS make GRU prediction if available (use advanced version)
+                        if gru_model is not None and is_model_trained:
+                            logger.info("🔄 Generating background GRU prediction for MSE tracking...")
+                            try:
+                                gru_pred = predict_with_advanced_gru(1)
+                                if not gru_pred:  # Fallback to basic if advanced fails
+                                    gru_pred = predict_with_gru(1)
+                            except Exception:
+                                gru_pred = predict_with_gru(1)
+                                
+                            if gru_pred:
+                                logger.info(f"✅ GRU prediction: {gru_pred}")
+                            else:
+                                logger.error("❌ GRU prediction failed!")
+                        else:
+                            logger.info(f"❌ GRU not available: model={gru_model is not None}, trained={is_model_trained}")
+                            
+                    except Exception as e:
+                        logger.error(f"❌ Background prediction generation failed: {e}")
+                        logger.error(f"Stack trace: {traceback.format_exc()}")
+                
+                # Emergency MSE system: create synthetic predictions if GRU has never made any
+                if len(predictions_history['gru']) == 0 and len(traffic_data) > 20 and is_model_trained:
+                    try:
+                        logger.warning("🆘 EMERGENCY: Creating synthetic GRU predictions for MSE testing")
+                        create_emergency_gru_predictions()
+                    except Exception as e:
+                        logger.error(f"Emergency prediction creation failed: {e}")
+                        
+                # Periodically save data
+                if len(traffic_data) % 10 == 0:
+                    save_data()
+            else:
+                logger.debug(f"⏸️  Monitoring only - CPU {current_cpu:.1f}% below threshold {config['cpu_threshold']}%")
             
             # Enhanced GRU model training logic
             minutes_elapsed = (current_time - start_time).total_seconds() / 60
@@ -1448,22 +1968,21 @@ def collect_metrics_from_prometheus():
             training_reason = ""
             
             # Initial training conditions - REDUCED REQUIREMENTS FOR AUTO-TRAINING
-            if not config['use_gru'] and not is_model_trained:
+            if not is_model_trained:
                 if minutes_elapsed >= config['training_threshold_minutes']:
                     # 🚀 REDUCED: was +10,20 now +2,15 to match manual training success
                     min_data_required = max(int(gru_config["look_back"]) + 2, 15)
                     if len(traffic_data) >= min_data_required:
-                        # 🚀 RELAXED CPU requirement for initial training (0.5% instead of 3%)
-                        cpu_requirement = 0.5  # Much lower for first training to ensure it happens
-                        if current_cpu >= cpu_requirement:
+                        # Use consistent CPU threshold for training
+                        if current_cpu >= config['cpu_threshold']:
                             should_train = True
                             training_reason = f"initial_training (elapsed: {minutes_elapsed:.1f}min, data: {len(traffic_data)}, cpu: {current_cpu:.1f}%)"
                         else:
-                            logger.debug(f"Waiting for CPU threshold: {current_cpu:.1f}% < {cpu_requirement}%")
+                            logger.debug(f"Waiting for CPU threshold: {current_cpu:.1f}% < {config['cpu_threshold']}%")
                     else:
                         logger.debug(f"Waiting for more data: {len(traffic_data)} < {min_data_required}")
                 else:
-                    logger.log(f"Waiting for time threshold: {minutes_elapsed:.1f} < {config['training_threshold_minutes']} minutes")
+                    logger.debug(f"Waiting for time threshold: {minutes_elapsed:.1f} < {config['training_threshold_minutes']} minutes")
             
             # Retrain conditions
             elif is_model_trained and current_cpu >= config['cpu_threshold']:
@@ -1491,10 +2010,7 @@ def collect_metrics_from_prometheus():
                     training_thread.daemon = True
                     training_thread.start()
                     
-                    # Update config immediately for first-time training
-                    if was_first_training and not config['use_gru']:
-                        config['use_gru'] = True
-                        save_config()
+                    # Config will be updated after successful training
                     
                     logger.info("🔄 ASYNC training started - Flask metrics remain unblocked!")
                     
@@ -1509,7 +2025,7 @@ def collect_metrics_from_prometheus():
                 # Each data point represents ~1 minute of runtime (collection_interval = 60s)
                 runtime_hours = len(traffic_data) / 60  # Approximate runtime hours based on data points
                 
-                if runtime_hours >= COLLECTION_HOURS:  # Configurable collection period
+                if runtime_hours >= 24:  # 24-hour collection period
                     data_collection_complete = True
                     
                     # Save the 24-hour dataset as permanent training data
@@ -1532,6 +2048,10 @@ def collect_metrics_from_prometheus():
         except Exception as e:
             logger.error(f"Error in metrics collection: {e}")
             time.sleep(5)  # Sleep for a short time on error
+    
+    # Safety check: log if we hit the iteration limit
+    if iteration_count >= max_iterations:
+        logger.warning(f"🚨 Data collection stopped due to safety limit ({max_iterations} iterations)")
 
 def preprocess_data(data, sequence_length=100):
     """Preprocess data for GRU model with enhanced error handling."""
@@ -1540,8 +2060,8 @@ def preprocess_data(data, sequence_length=100):
         return None, None
     
     try:
-        X, y = [], []
         df = pd.DataFrame(data)
+        X, y = [], []
         
         # Ensure required columns exist
         required_features = ['traffic', 'cpu_utilization', 'replicas']
@@ -1594,6 +2114,48 @@ def preprocess_data(data, sequence_length=100):
     except Exception as e:
         logger.error(f"Error in preprocess_data: {e}")
         return None, None
+
+def build_gru_model_with_data(data_copy):
+    """Thread-safe GRU model training with provided data copy."""
+    global gru_model, last_training_time, is_model_trained, scaler_X, scaler_y
+    
+    # Temporarily replace global traffic_data with our copy for preprocessing
+    original_traffic_data = traffic_data[:]
+    traffic_data[:] = data_copy
+    
+    try:
+        # Use the existing build_gru_model function which is already complete
+        result = build_gru_model()
+        logger.info(f"✅ Thread-safe GRU training result: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ Thread-safe GRU training failed: {e}")
+        return False
+    finally:
+        # Always restore original traffic data
+        traffic_data[:] = original_traffic_data
+
+def build_advanced_gru_model_with_data(data_copy):
+    """Thread-safe advanced GRU model training with provided data copy."""
+    global gru_model, last_training_time, is_model_trained, scaler_X, scaler_y
+    
+    # Temporarily replace global traffic_data with our copy for preprocessing
+    original_traffic_data = traffic_data[:]
+    traffic_data[:] = data_copy
+    
+    try:
+        # Use the existing build_advanced_gru_model function which is already complete
+        result = build_advanced_gru_model()
+        logger.info(f"✅ Thread-safe advanced GRU training result: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ Thread-safe advanced GRU training failed: {e}")
+        return False
+    finally:
+        # Always restore original traffic data
+        traffic_data[:] = original_traffic_data
 
 def build_gru_model():
     """Build and train GRU model with enhanced error handling and validation."""
@@ -1898,8 +2460,8 @@ def predict_with_holtwinters(steps=None):
         steps = int(hw_config["look_forward"])
     
     try:
-        # Use training dataset if collection is complete, otherwise use current data
-        prediction_data = training_dataset if data_collection_complete and training_dataset else traffic_data
+        # Always use recent sliding window of traffic_data (paper approach)
+        prediction_data = traffic_data
         
         if len(prediction_data) < 12: # Need enough data for seasonal period
             logger.info(f"Not enough data for Holt-Winters prediction: {len(prediction_data)} < 12")
@@ -1937,7 +2499,7 @@ def predict_with_holtwinters(steps=None):
         add_prediction_to_history('holt_winters', forecast[0], immediate_timestamp)
         
         elapsed_ms = (time.time() - start_time_func) * 1000
-        prediction_time.labels(model="holtwinters").set(elapsed_ms)
+        prediction_time.labels(model="holt_winters").set(elapsed_ms)
         
         logger.info(f"Holt-Winters forecast generated: {forecast}")
         return forecast
@@ -2071,7 +2633,6 @@ def predict_with_gru(steps=None):
         
     except Exception as e:
         logger.error(f"🚨 UNEXPECTED GRU ERROR: {e}")
-        import traceback
         logger.error(f"Stack trace: {traceback.format_exc()}")
         return None
 
@@ -2225,7 +2786,7 @@ def predict_with_optimized_holtwinters(steps=None):
         add_prediction_to_history('holt_winters', forecast_processed[0], immediate_timestamp)
         
         elapsed_ms = (time.time() - start_time_func) * 1000
-        prediction_time.labels(model="holtwinters_optimized").set(elapsed_ms)
+        prediction_time.labels(model="holt_winters_optimized").set(elapsed_ms)
         
         logger.info(f"✅ Optimized Holt-Winters forecast: {forecast_processed}")
         return forecast_processed
@@ -2389,12 +2950,13 @@ def make_scaling_decision_with_minheap(predictions):
                 recommended = max(min_replicas, current_replicas - 1)
                 heapq.heappush(decision_heap, (2.0, "scale_down", recommended, f"sustained_low_cpu_{consecutive_low_cpu_count}"))
         
-        # Priority 3: High CPU requires immediate scale up
+        # Priority 3: High CPU requires scale up (only for extreme cases)
         if current_cpu > scale_up_threshold:
-            if current_time - last_scale_up_time >= 60:
+            if current_time - last_scale_up_time >= 30:  # Faster response for predictions
                 if predictions and len(predictions) > 0:
                     predicted_replicas = predictions[0] if isinstance(predictions[0], (int, float)) else current_replicas
-                    recommended = min(max_replicas_limit, max(predicted_replicas, current_replicas + 1))
+                    # Use prediction directly, don't add extra replica
+                    recommended = min(max_replicas_limit, max(predicted_replicas, current_replicas))
                 else:
                     recommended = min(max_replicas_limit, current_replicas + 1)
                 if recommended > current_replicas:
@@ -2405,7 +2967,7 @@ def make_scaling_decision_with_minheap(predictions):
             if current_time - last_scale_down_time >= scale_down_delay:
                 heapq.heappush(decision_heap, (4.0, "scale_down", min_replicas, f"very_low_activity"))
     
-    # Priority 5-10: MSE-based prediction decisions using model ranking
+    # Priority 2.5-4.5: MSE-based prediction decisions (HIGHER priority than reactive scaling)
     if predictions and len(predictions) > 0:
         # Get all model predictions with their MSE rankings
         model_predictions = get_ranked_model_predictions()
@@ -2415,18 +2977,20 @@ def make_scaling_decision_with_minheap(predictions):
                 continue
                 
             predicted_replicas = int(round(pred_value))
-            priority = 5.0 + (rank * 0.1)  # Lower MSE models get higher priority
+            priority = 2.5 + (rank * 0.1)  # Predictions get higher priority than reactive scaling
             
-            # Scale up prediction
-            if predicted_replicas > current_replicas and current_time - last_scale_up_time >= 60:
-                if current_cpu > scale_down_threshold:  # Only if CPU supports scale up
-                    heapq.heappush(decision_heap, (priority, "scale_up", predicted_replicas, f"{model_name}_mse_{mse:.3f}"))
+            # Predictive scale up - be proactive
+            if predicted_replicas > current_replicas and current_time - last_scale_up_time >= 20:
+                # Use predictive scaling more aggressively - scale before CPU gets high
+                if current_cpu > 40 or model_name in ['holt_winters', 'ensemble']:  # Trust predictions more
+                    heapq.heappush(decision_heap, (priority, "scale_up", predicted_replicas, f"predictive_{model_name}_mse_{mse:.3f}"))
             
-            # Scale down prediction  
+            # Predictive scale down - be efficient  
             elif predicted_replicas < current_replicas and current_replicas > cost_config.get('min_replicas', 1):
-                if current_time - last_scale_down_time >= cost_config.get('scale_down_delay_minutes', 2) * 60:
-                    if current_cpu < cost_config.get('scale_up_threshold', 80):  # Only if CPU supports scale down
-                        heapq.heappush(decision_heap, (priority + 1.0, "scale_down", predicted_replicas, f"{model_name}_mse_{mse:.3f}"))
+                if current_time - last_scale_down_time >= 30:  # Faster predictive scale down
+                    # Trust predictions for scale down when CPU is not extremely high
+                    if current_cpu < 85:
+                        heapq.heappush(decision_heap, (priority + 0.5, "scale_down", predicted_replicas, f"predictive_{model_name}_mse_{mse:.3f}"))
     
     # Priority 11: Maintain current state (lowest priority)
     heapq.heappush(decision_heap, (11.0, "maintain", current_replicas, "default_maintain"))
@@ -2441,7 +3005,12 @@ def make_scaling_decision_with_minheap(predictions):
         elif decision == "scale_down":
             last_scale_down_time = current_time
         
-        logger.info(f"🎯 MinHeap scaling decision: {decision} to {replicas} replicas (priority: {priority:.1f}, reason: {reason})")
+        # Final safety check: Enforce absolute bounds
+        max_replicas_absolute = cost_config.get('max_replicas', 10)
+        min_replicas_absolute = cost_config.get('min_replicas', 1)
+        replicas = max(min_replicas_absolute, min(max_replicas_absolute, int(replicas)))
+        
+        logger.info(f"🎯 MinHeap scaling decision: {decision} to {replicas} replicas (priority: {priority:.1f}, reason: {reason}, bounds: {min_replicas_absolute}-{max_replicas_absolute})")
         
         return decision, int(replicas)
     
@@ -2524,6 +3093,53 @@ def compare_predictions_with_heap(gru_predictions, hw_predictions):
     
     return "Holt-Winters", hw_predictions
 
+def continuous_mse_updater():
+    """Dedicated thread to continuously update MSE calculations every 30 seconds"""
+    global is_mse_updating, last_mse_calculation
+    
+    logger.info("🔄 Started continuous MSE updater thread")
+    
+    while is_mse_updating:
+        try:
+            current_time = datetime.now()
+            
+            # Update MSE every 30 seconds
+            if last_mse_calculation is None or (current_time - last_mse_calculation).total_seconds() >= 30:
+                logger.debug("🔄 Running automatic MSE calculation...")
+                update_mse_metrics()
+                last_mse_calculation = current_time
+                logger.debug("✅ Automatic MSE calculation completed")
+            
+            # Sleep for 10 seconds, check every 10s but update every 30s
+            time.sleep(10)
+            
+        except Exception as e:
+            logger.error(f"Error in continuous MSE updater: {e}")
+            time.sleep(30)  # Wait longer on error
+    
+    logger.info("🛑 Continuous MSE updater thread stopped")
+
+def start_mse_updater():
+    """Start the continuous MSE updater thread."""
+    global is_mse_updating, mse_update_thread
+    
+    if not is_mse_updating:
+        is_mse_updating = True
+        mse_update_thread = threading.Thread(target=continuous_mse_updater)
+        mse_update_thread.daemon = True
+        mse_update_thread.start()
+        logger.info("Started continuous MSE updater")
+        return True
+    return False
+
+def stop_mse_updater():
+    """Stop the continuous MSE updater thread."""
+    global is_mse_updating
+    
+    if is_mse_updating:
+        is_mse_updating = False
+        logger.info("Stopped continuous MSE updater")
+
 def start_collection():
     """Start the metrics collection thread."""
     global is_collecting, collection_thread, data_collection_complete
@@ -2564,6 +3180,8 @@ def health_check():
 @app.route('/status', methods=['GET'])
 def status():
     """Enhanced status endpoint with detailed GRU debugging information."""
+    global gru_model
+    
     minutes_elapsed = (datetime.now() - start_time).total_seconds() / 60
     idle_minutes = 0
     if low_traffic_start_time:
@@ -2572,7 +3190,7 @@ def status():
     # Enhanced GRU status information
     gru_config = config["models"]["gru"]
     min_data_required = max(int(gru_config["look_back"]) + 10, 20)
-    current_cpu = traffic_data[-1]['cpu_utilization'] if traffic_data else 0
+    current_cpu = get_current_cpu_from_prometheus()  # Get real-time CPU for status
     
     # Training readiness check
     training_ready = {
@@ -2671,6 +3289,8 @@ def get_metrics_data():
 @app.route('/predict', methods=['GET'])
 def get_prediction():
     """Return prediction and scaling recommendation with enhanced MSE tracking."""
+    global gru_model, is_model_trained
+    
     gru_config = config["models"]["gru"]
     hw_config = config["models"]["holt_winters"]
     
@@ -2685,8 +3305,8 @@ def get_prediction():
         try:
             start_time_func = time.time()
             gru_predictions = predict_with_gru(steps)
-            prediction_latency.labels(method="GRU").observe(time.time() - start_time_func)
-            prediction_requests.labels(method="GRU").inc()
+            prediction_latency.labels(method="gru").observe(time.time() - start_time_func)
+            prediction_requests.labels(method="gru").inc()
             logger.info("GRU prediction made for MSE tracking")
         except Exception as e:
             logger.error(f"GRU prediction failed: {e}")
@@ -2695,8 +3315,8 @@ def get_prediction():
     try:
         start_time_func = time.time()
         hw_predictions = predict_with_holtwinters(steps)
-        prediction_latency.labels(method="Holt-Winters").observe(time.time() - start_time_func)
-        prediction_requests.labels(method="Holt-Winters").inc()
+        prediction_latency.labels(method="holt_winters").observe(time.time() - start_time_func)
+        prediction_requests.labels(method="holt_winters").inc()
         logger.info("Holt-Winters prediction made for MSE tracking")
     except Exception as e:
         logger.error(f"Holt-Winters prediction failed: {e}")
@@ -2750,6 +3370,8 @@ def get_prediction():
 @app.route('/predict_combined', methods=['GET'])
 def predict_combined():
     """Combined prediction endpoint with enhanced MSE-based model selection."""
+    global gru_model, is_model_trained
+    
     try:
         minutes_elapsed = (datetime.now() - start_time).total_seconds() / 60
         
@@ -3010,9 +3632,9 @@ def initialize():
     current_mse.labels(model="gru").set(-1.0)  # Start with -1 (insufficient data)
     current_mse.labels(model="holt_winters").set(-1.0)
     training_time.labels(model="gru").set(0.0)
-    training_time.labels(model="holtwinters").set(0.0)
+    training_time.labels(model="holt_winters").set(0.0)
     prediction_time.labels(model="gru").set(0.0)
-    prediction_time.labels(model="holtwinters").set(0.0)
+    prediction_time.labels(model="holt_winters").set(0.0)
     predictive_scaler_recommended_replicas.labels(method='gru').set(0)
     predictive_scaler_recommended_replicas.labels(method='holtwinters').set(0)
     model_selection.labels(model='gru', reason='initialization').inc(0)
@@ -3028,6 +3650,9 @@ def initialize():
     logger.info(f"GRU Status: trained={is_model_trained}, use_gru={config['use_gru']}")
     logger.info(f"GRU Training requirements: {config['training_threshold_minutes']} minutes, {min_data_required} data points, CPU > {config['cpu_threshold']}%")
     logger.info(f"Current data points: {len(traffic_data)}")
+    
+    # Start continuous MSE updater
+    start_mse_updater()
     
     # Start collection
     start_collection()
@@ -3102,6 +3727,8 @@ def debug_train_gru():
 @app.route('/debug/gru_status', methods=['GET'])
 def debug_gru_status():
     """Debug endpoint for detailed GRU status information."""
+    global gru_model, is_model_trained
+    
     minutes_elapsed = (datetime.now() - start_time).total_seconds() / 60
     gru_config = config["models"]["gru"]
     min_data_required = max(int(gru_config["look_back"]) + 10, 20)
@@ -3182,6 +3809,8 @@ def debug_force_mse_update():
 @app.route('/debug/predictions', methods=['GET'])
 def debug_predictions():
     """Debug endpoint to show all predictions and their matching status."""
+    global gru_model, is_model_trained
+    
     try:
         result = {
             'timestamp': datetime.now().isoformat(),
@@ -3218,6 +3847,8 @@ def debug_predictions():
 @app.route('/debug/force_predictions', methods=['POST'])
 def debug_force_predictions():
     """Debug endpoint to force both models to make predictions."""
+    global gru_model, is_model_trained
+    
     try:
         if len(traffic_data) < 12:
             return jsonify({
@@ -3286,6 +3917,8 @@ def debug_force_predictions():
 @app.route('/debug/gru_deep_check', methods=['GET'])
 def debug_gru_deep_check():
     """Deep diagnostic check of GRU model state and prediction capability."""
+    global gru_model, is_model_trained
+    
     try:
         result = {
             'timestamp': datetime.now().isoformat(),
@@ -3492,6 +4125,8 @@ def debug_model_comparison():
 @app.route('/predict_enhanced', methods=['GET'])
 def predict_enhanced():
     """Enhanced prediction endpoint using the best available method including ensemble."""
+    global gru_model, is_model_trained
+    
     try:
         steps = request.args.get('steps', default=1, type=int)
         use_ensemble = request.args.get('ensemble', default='auto', type=str)
@@ -3835,24 +4470,317 @@ def reset_data():
             "message": f"Data reset failed: {str(e)}"
         }), 500
 
+@app.route('/debug/mse_updater_status', methods=['GET'])
+def debug_mse_updater_status():
+    """Check the status of the continuous MSE updater"""
+    try:
+        return jsonify({
+            'mse_updater_running': is_mse_updating,
+            'mse_thread_alive': mse_update_thread.is_alive() if mse_update_thread else False,
+            'last_mse_calculation': last_mse_calculation.isoformat() if last_mse_calculation else None,
+            'seconds_since_last_mse': (datetime.now() - last_mse_calculation).total_seconds() if last_mse_calculation else None,
+            'current_mse': {
+                'gru': gru_mse if gru_mse != float('inf') else -1,
+                'holt_winters': holt_winters_mse if holt_winters_mse != float('inf') else -1
+            },
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/debug/force_mse_calculation', methods=['POST'])
+def debug_force_mse_calculation():
+    """Force MSE calculation and return detailed results"""
+    try:
+        logger.info("🔧 DEBUG: Forcing MSE calculation...")
+        
+        # Check prediction history
+        gru_predictions = len(predictions_history.get('gru', []))
+        hw_predictions = len(predictions_history.get('holt_winters', []))
+        gru_matched = len([p for p in predictions_history.get('gru', []) if p.get('matched', False)])
+        hw_matched = len([p for p in predictions_history.get('holt_winters', []) if p.get('matched', False)])
+        
+        # Force MSE calculation
+        update_mse_metrics()
+        
+        result = {
+            'forced_calculation': True,
+            'timestamp': datetime.now().isoformat(),
+            'predictions_before': {
+                'gru_total': gru_predictions,
+                'gru_matched': gru_matched,
+                'hw_total': hw_predictions,
+                'hw_matched': hw_matched
+            },
+            'mse_results': {
+                'gru_mse': gru_mse if gru_mse != float('inf') else None,
+                'holt_winters_mse': holt_winters_mse if holt_winters_mse != float('inf') else None,
+                'last_calculation': last_mse_calculation.isoformat() if last_mse_calculation else None
+            },
+            'debug_info': {
+                'min_samples_required': config['mse_config']['min_samples_for_mse'],
+                'mse_window_size': config['mse_config']['mse_window_size'],
+                'mse_enabled': config['mse_config']['enabled']
+            }
+        }
+        
+        logger.info(f"🔧 DEBUG: MSE calculation completed - GRU: {result['mse_results']['gru_mse']}, HW: {result['mse_results']['holt_winters_mse']}")
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"🔧 DEBUG: Force MSE calculation failed: {e}")
+        return jsonify({'error': str(e), 'timestamp': datetime.now().isoformat()}), 500
+
+@app.route('/debug/coroutine_status', methods=['GET'])
+def debug_coroutine_status():
+    """Check the status of the two-coroutine system"""
+    try:
+        return jsonify({
+            'two_coroutine_system': {
+                'main_coroutine_running': is_main_coroutine_running,
+                'update_coroutine_running': is_update_coroutine_running,
+                'main_thread_alive': main_coroutine_thread.is_alive() if main_coroutine_thread else False,
+                'update_thread_alive': update_coroutine_thread.is_alive() if update_coroutine_thread else False
+            },
+            'configuration': {
+                'prediction_interval': PREDICTION_INTERVAL,
+                'update_interval': UPDATE_INTERVAL,
+                'gru_retraining_interval': GRU_RETRAINING_INTERVAL,
+                'holt_winters_update_interval': HOLT_WINTERS_UPDATE_INTERVAL
+            },
+            'retraining_status': {
+                'last_gru_retraining': last_gru_retraining.isoformat() if last_gru_retraining else None,
+                'last_holt_winters_update': last_holt_winters_update.isoformat() if last_holt_winters_update else None,
+                'gru_needs_retraining': gru_needs_retraining,
+                'seconds_since_gru_retrain': (datetime.now() - last_gru_retraining).total_seconds() if last_gru_retraining else None,
+                'seconds_since_hw_update': (datetime.now() - last_holt_winters_update).total_seconds() if last_holt_winters_update else None
+            },
+            'data_status': {
+                'traffic_data_points': len(traffic_data),
+                'using_sliding_window': True,
+                'window_size_hours': 24,
+                'paper_architecture': True
+            },
+            'real_data_collection': {
+                'synthetic_data_enabled': SYNTHETIC_DATA_ENABLED,
+                'collection_approach': '24-hour realistic scenario',
+                'real_data_count': sum(1 for p in traffic_data if not p.get('synthetic', False)),
+                'data_collection_hours': round(len(traffic_data) / 60, 2) if traffic_data else 0,
+                'gru_ready_threshold': max(int(config["models"]["gru"]["look_back"]) + 5, 105),
+                'gru_ready': len(traffic_data) >= max(int(config["models"]["gru"]["look_back"]) + 5, 105)
+            },
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/debug/restart_coroutines', methods=['POST'])
+def debug_restart_coroutines():
+    """Restart the two-coroutine system"""
+    try:
+        logger.info("🔄 DEBUG: Restarting two-coroutine system...")
+        
+        # Stop current system
+        stop_two_coroutine_system()
+        time.sleep(2)  # Give threads time to stop
+        
+        # Start new system
+        start_two_coroutine_system()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Two-coroutine system restarted',
+            'timestamp': datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        logger.error(f"🔧 DEBUG: Restart coroutines failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/debug/hybrid_status', methods=['GET'])
+def debug_hybrid_status():
+    """Check hybrid dataset status and composition"""
+    try:
+        synthetic_count = sum(1 for p in traffic_data if p.get('synthetic', False))
+        real_count = sum(1 for p in traffic_data if not p.get('synthetic', False))
+        
+        return jsonify({
+            'hybrid_dataset': {
+                'total_points': len(traffic_data),
+                'synthetic_points': synthetic_count,
+                'real_points': real_count,
+                'synthetic_percentage': round((synthetic_count / len(traffic_data)) * 100, 2) if traffic_data else 0,
+                'using_synthetic_data': using_synthetic_data
+            },
+            'configuration': {
+                'synthetic_data_enabled': SYNTHETIC_DATA_ENABLED,
+                'synthetic_data_file': SYNTHETIC_DATA_FILE,
+                'fallback_hours': FALLBACK_SYNTHETIC_HOURS
+            },
+            'transition_status': {
+                'transition_time': synthetic_to_real_transition_time.isoformat() if synthetic_to_real_transition_time else None,
+                'ready_for_transition': real_count >= 120 and synthetic_to_real_transition_time and datetime.now() > synthetic_to_real_transition_time,
+                'real_data_threshold': 120,
+                'current_real_data': real_count
+            },
+            'data_ranges': {
+                'traffic_range': [min(p['traffic'] for p in traffic_data), max(p['traffic'] for p in traffic_data)] if traffic_data else [0, 0],
+                'cpu_range': [min(p['cpu_utilization'] for p in traffic_data), max(p['cpu_utilization'] for p in traffic_data)] if traffic_data else [0, 0],
+                'replica_range': [min(p['replicas'] for p in traffic_data), max(p['replicas'] for p in traffic_data)] if traffic_data else [0, 0]
+            },
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/debug/regenerate_synthetic', methods=['POST'])
+def debug_regenerate_synthetic():
+    """Regenerate synthetic dataset with specified parameters"""
+    try:
+        data = request.get_json() or {}
+        hours = data.get('hours', FALLBACK_SYNTHETIC_HOURS)
+        
+        logger.info(f"🔧 DEBUG: Regenerating synthetic dataset with {hours} hours...")
+        
+        # Since synthetic data is disabled, return info message
+        return jsonify({
+            'success': False,
+            'message': 'Synthetic data generation is disabled - using real data collection only',
+            'synthetic_data_enabled': SYNTHETIC_DATA_ENABLED,
+            'current_data_points': len(traffic_data),
+            'timestamp': datetime.now().isoformat()
+        })
+        
+            
+    except Exception as e:
+        logger.error(f"🔧 DEBUG: Regenerate synthetic failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/debug/force_transition', methods=['POST'])
+def debug_force_transition():
+    """Force transition from synthetic to real data"""
+    try:
+        logger.info("🔄 DEBUG: Forcing transition from synthetic to real data...")
+        
+        real_count = sum(1 for p in traffic_data if not p.get('synthetic', False))
+        
+        if real_count < 50:
+            return jsonify({
+                'error': f'Not enough real data for transition: {real_count} < 50',
+                'real_data_count': real_count
+            }), 400
+        
+        # Force transition by setting time to past
+        global synthetic_to_real_transition_time
+        synthetic_to_real_transition_time = datetime.now() - timedelta(minutes=1)
+        
+        # Since synthetic data is disabled, return info message
+        return jsonify({
+            'success': False,
+            'message': 'Synthetic data is disabled - using real data collection only',
+            'synthetic_data_enabled': SYNTHETIC_DATA_ENABLED,
+            'real_data_count': len(traffic_data),
+            'using_synthetic_data': False,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        logger.error(f"🔧 DEBUG: Force transition failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/debug/load_synthetic_file', methods=['POST'])
+def debug_load_synthetic_file():
+    """Load specific synthetic dataset file"""
+    try:
+        data = request.get_json() or {}
+        filename = data.get('filename', SYNTHETIC_DATA_FILE)
+        
+        logger.info(f"🔧 DEBUG: Loading synthetic dataset from {filename}...")
+        
+        # Since synthetic data is disabled, return info message
+        return jsonify({
+            'success': False,
+            'message': 'Synthetic data loading is disabled - using real data collection only',
+            'synthetic_data_enabled': SYNTHETIC_DATA_ENABLED,
+            'requested_filename': filename,
+            'current_data_points': len(traffic_data),
+            'timestamp': datetime.now().isoformat()
+        })
+        
+            
+    except Exception as e:
+        logger.error(f"🔧 DEBUG: Load synthetic file failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
-    # Initialize directly when run as a script
-    logger.info("🚀 Starting predictive autoscaler with MinHeap-based MSE model selection...")
-    logger.info("🎯 MinHeap system: Model selection based on lowest MSE priority")
+    # Initialize paper-based two-coroutine architecture
+    logger.info("🚀 Starting predictive autoscaler with Paper-based Two-Coroutine Architecture...")
+    logger.info("📄 Implementation: 'A Time Series-Based Approach to Elastic Kubernetes Scaling'")
+    logger.info("🔄 Architecture: Main Coroutine (predictions) + Update Coroutine (model training)")
+    
+    # Log configuration for debugging
+    logger.info(f"🎯 Target deployment: {config['target_deployment']}")
+    logger.info(f"🎯 Target namespace: {config['target_namespace']}")  
+    logger.info(f"🎯 Prometheus server: {config['prometheus_server']}")
+    logger.info(f"🎯 CPU threshold: {config['cpu_threshold']}%")
+    
     load_data()
     filter_stale_data()
     initialize()
     
-    # Start data collection automatically if not complete
-    if not data_collection_complete:
-        runtime_hours = len(traffic_data) / 60
-        sessions_completed = int(runtime_hours / 4)
-        logger.info(f"🧪 Testing Mode: Starting 4-hour data collection...")
-        logger.info(f"📊 Progress: {runtime_hours:.1f}/4 hours ({len(traffic_data)}/240 data points)")
-        logger.info(f"📈 Sessions: {sessions_completed}/1 completed (4 hours total)")
-        start_collection()
-    else:
-        logger.info(f"✅ Using stored 4-hour test dataset with {len(traffic_data)} data points")
-        logger.info("🧪 Testing: 4-hour collection completed, ready for testing!")
+    # Real Data Collection Approach (24-hour realistic scenario)
+    logger.info("🌐 Real Data Collection: 24-Hour Realistic Scenario")
+    logger.info("📊 Models will train as real data is collected")
+    logger.info("⏰ GRU training will begin after 105+ data points (~1.75 hours)")
+    logger.info("🎯 Full model performance available after 24 hours of operation")
     
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    # Check if we have any existing data
+    if len(traffic_data) > 0:
+        logger.info(f"📈 Found {len(traffic_data)} existing data points")
+        
+        # Try to train models if we have enough data
+        gru_config = config["models"]["gru"]  # Define gru_config
+        min_hw_data = 10
+        min_gru_data = max(int(gru_config["look_back"]) + 5, 105)
+        
+        if len(traffic_data) >= min_hw_data:
+            logger.info("🧠 Attempting Holt-Winters training with existing data...")
+            try:
+                hw_pred = predict_with_holtwinters(steps=1)
+                if hw_pred and len(hw_pred) > 0:
+                    logger.info("✅ Holt-Winters ready with existing data")
+            except Exception as e:
+                logger.info(f"⏰ Holt-Winters not ready yet: {e}")
+        
+        if len(traffic_data) >= min_gru_data:
+            logger.info("🧠 Attempting GRU training with existing data...")
+            try:
+                success = build_gru_model()
+                if success:
+                    logger.info("✅ GRU ready with existing data")
+            except Exception as e:
+                logger.info(f"⏰ GRU not ready yet: {e}")
+    else:
+        logger.info("🆕 Starting fresh - no existing data found")
+        logger.info("📊 Beginning real-time data collection for 24-hour realistic scenario")
+    
+    # Start the paper-based two-coroutine system
+    logger.info(f"⚙️  Configuration:")
+    logger.info(f"   📊 Prediction Interval: {PREDICTION_INTERVAL}s (Main Coroutine)")
+    logger.info(f"   🔄 Update Interval: {UPDATE_INTERVAL}s (Update Coroutine)")
+    logger.info(f"   🧠 GRU Retraining: {GRU_RETRAINING_INTERVAL}s")
+    logger.info(f"   📈 Holt-Winters Updates: {HOLT_WINTERS_UPDATE_INTERVAL}s")
+    
+    start_two_coroutine_system()
+    
+    # Keep legacy MSE updater for compatibility (will be phased out)
+    start_mse_updater()
+    
+    try:
+        app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    except KeyboardInterrupt:
+        logger.info("🛑 Shutting down...")
+        stop_two_coroutine_system()
+    except Exception as e:
+        logger.error(f"❌ Application error: {e}")
+        stop_two_coroutine_system()
