@@ -39,9 +39,9 @@ TEST_TARGETS = {
 
 # Traffic pattern configuration - 5-minute seasons with double peaks
 NORMAL_LOAD_RANGE = (2, 5)           # Baseline requests per second during normal periods  
-PEAK_LOAD_RANGE = (20, 30)           # Peak requests per second during high-demand periods (lowered)
+PEAK_LOAD_RANGE = (35, 50)           # Peak requests per second during high-demand periods (lowered)
 SEASON_DURATION = 300              # 5-minute seasons
-PEAK_DURATION = 30                 # Shorter, sharper peaks (30s instead of 60s)
+PEAK_DURATION = 60                 # Shorter, sharper peaks (60s instead of 30s)
 PEAK_START_OFFSET = 60             # Peak starts at 1 minute into each season
 VOLATILITY_FACTOR = 0.3            # HIGH volatility for unpredictable patterns
 
@@ -294,15 +294,15 @@ class LoadTester:
             except Exception:
                 logger.debug(f"Predictive response (non-JSON): {response.text}")
         except (ConnectTimeout, ReadTimeout) as e:
-            logger.error(f"Predictive request timed out to {full_url}: {e}")
+            logger.error(f"GRU & Holt-Winters prediction models timed out to {full_url}: {e}")
             status_code = -1
             response_time_ms = -1
-            error_msg = "Timeout"
+            error_msg = "GRU & Holt-Winters models timeout"
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error making predictive request to {full_url}: {e}")
+            logger.error(f"GRU & Holt-Winters prediction models failed to {full_url}: {e}")
             status_code = e.response.status_code if e.response is not None else -1
             response_time_ms = (time.time() - start_time) * 1000
-            error_msg = str(e)
+            error_msg = f"GRU & Holt-Winters models failed: {str(e)}"
         results_list.append({
             "timestamp": datetime.now().isoformat(),
             "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()) if self.start_time else 0,
@@ -372,7 +372,7 @@ class LoadTester:
                             logger.warning(f"Could not extract product ID: {e}")
                 else:
                     failed += 1
-                    logger.warning(f"Request to {full_url} failed with status {status_code}")
+                    logger.warning(f"{name} service request to {full_url} failed with status {status_code}")
                 results_list.append({
                     "timestamp": datetime.now().isoformat(),
                     "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
@@ -387,7 +387,7 @@ class LoadTester:
                 })
             except (ConnectTimeout, ReadTimeout) as e:
                 failed += 1
-                logger.error(f"Timeout error making request to {url}{endpoint}: {e}")
+                logger.error(f"{name} service timed out to {url}{endpoint}: {e}")
                 results_list.append({
                     "timestamp": datetime.now().isoformat(),
                     "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
@@ -396,14 +396,14 @@ class LoadTester:
                     "endpoint": endpoint if 'endpoint' in locals() else "unknown",
                     "status_code": -1,
                     "response_time_ms": -1,
-                    "error": str(e),
+                    "error": f"{name} service timeout: {str(e)}",
                     "request_count": request_count,
                     "service": name,
                     "endpoint_type": endpoint_type if 'endpoint_type' in locals() else "unknown"
                 })
             except Exception as e:
                 failed += 1
-                logger.error(f"Error making request to {url}{endpoint}: {e}")
+                logger.error(f"{name} service failed to {url}{endpoint}: {e}")
                 results_list.append({
                     "timestamp": datetime.now().isoformat(),
                     "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
@@ -412,7 +412,7 @@ class LoadTester:
                     "endpoint": endpoint if 'endpoint' in locals() else "unknown",
                     "status_code": -1,
                     "response_time_ms": -1,
-                    "error": str(e),
+                    "error": f"{name} service failed: {str(e)}",
                     "request_count": request_count,
                     "service": name,
                     "endpoint_type": endpoint_type if 'endpoint_type' in locals() else "unknown"
