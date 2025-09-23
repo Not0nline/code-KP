@@ -61,3 +61,9 @@ curl http://localhost:5000/debug/mse_stability | jq
 
 # Force MSE metrics update
 curl -X POST http://localhost:5000/debug/force_mse_update
+
+# restart deployment 
+kubectl rollout restart deployment predictive-scaler
+
+# see logs 
+kubectl logs -l app=predictive-scaler --tail=20
