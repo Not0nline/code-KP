@@ -403,7 +403,7 @@ class LoadTester:
                 })
             except Exception as e:
                 failed += 1
-                logger.error(f"{name} service failed to {url}{endpoint}: {e}")
+                logger.error(f"[{name} service] failed to {url}{endpoint}: {e}")
                 results_list.append({
                     "timestamp": datetime.now().isoformat(),
                     "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
