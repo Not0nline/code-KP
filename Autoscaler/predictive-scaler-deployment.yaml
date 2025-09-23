@@ -17,7 +17,7 @@ spec:
       containers:
       - name: predictive-scaler
         # Make sure image includes the kubernetes client library!
-        image: 4dri41/predictive-scaler:fix-indentation-20250923-145200 # Use your actual image
+        image: 4dri41/predictive-scaler:force-rebuild-final # Use your actual image
         imagePullPolicy: Always
         ports:
         - containerPort: 5000

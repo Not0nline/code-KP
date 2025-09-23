@@ -267,7 +267,7 @@ def main_coroutine():
                 try:
                     # Try GRU prediction  
                     if len(traffic_data) >= 105:
-                        gru_pred = predict_with_gru(steps=1)
+                        gru_pred = predict_with_advanced_gru(steps=1)
                         if gru_pred and len(gru_pred) > 0:
                             predictions['gru'] = int(gru_pred[0])
                 except Exception as e:
@@ -2839,16 +2839,18 @@ def predict_with_advanced_gru(steps=None):
                 X = enhanced_data[available_features].values
                 logger.info(f"✅ Using {len(available_features)} advanced features for prediction")
             else:
-                # Fallback to basic features
-                return predict_with_gru(steps)
+                # Not enough advanced features available
+                logger.warning("Insufficient advanced features, cannot make prediction")
+                return None
         else:
-            # Fallback to basic prediction
-            return predict_with_gru(steps)
+            # Basic features not sufficient for advanced prediction
+            logger.warning("Basic features not sufficient for advanced GRU prediction")
+            return None
         
         # Validate scaler compatibility
         if hasattr(scaler_X, 'n_features_in_') and X.shape[1] != scaler_X.n_features_in_:
-            logger.warning(f"Advanced feature mismatch: got {X.shape[1]}, expected {scaler_X.n_features_in_}. Falling back to basic GRU.")
-            return predict_with_gru(steps)
+            logger.error(f"Advanced feature mismatch: got {X.shape[1]}, expected {scaler_X.n_features_in_}. Cannot proceed.")
+            return None
         
         # Clean data
         if np.any(np.isnan(X)) or np.any(np.isinf(X)):
@@ -2861,13 +2863,13 @@ def predict_with_advanced_gru(steps=None):
             X_seq = X_scaled.reshape(1, look_back, len(available_features))
         except Exception as e:
             logger.error(f"Error during advanced data scaling: {e}")
-            return predict_with_gru(steps)
+            return None
         
         # Validate input shape
         expected_shape = gru_model.input_shape
         if X_seq.shape[1:] != expected_shape[1:]:
-            logger.warning(f"Advanced shape mismatch: input={X_seq.shape[1:]}, expected={expected_shape[1:]}. Falling back to basic GRU.")
-            return predict_with_gru(steps)
+            logger.error(f"Advanced shape mismatch: input={X_seq.shape[1:]}, expected={expected_shape[1:]}. Cannot proceed.")
+            return None
         
         # Make prediction
         try:
@@ -2909,8 +2911,8 @@ def predict_with_advanced_gru(steps=None):
         return predictions
         
     except Exception as e:
-        logger.error(f"🚨 Advanced GRU ERROR: {e}, falling back to basic GRU")
-        return predict_with_gru(steps)
+        logger.error(f"🚨 Advanced GRU ERROR: {e}")
+        return None
 
 def make_scaling_decision_with_minheap(predictions):
     """MinHeap-based scaling decision using MSE-ranked model predictions"""
@@ -3306,7 +3308,7 @@ def get_prediction():
     if gru_model is not None and is_model_trained:
         try:
             start_time_func = time.time()
-            gru_predictions = predict_with_gru(steps)
+            gru_predictions = predict_with_advanced_gru(steps)
             prediction_latency.labels(method="gru").observe(time.time() - start_time_func)
             prediction_requests.labels(method="gru").inc()
             logger.info("GRU prediction made for MSE tracking")
@@ -3407,7 +3409,7 @@ def predict_combined():
         # Make GRU prediction if available
         if gru_model is not None and is_model_trained:
             try:
-                gru_predictions = predict_with_gru()
+                gru_predictions = predict_with_advanced_gru()
                 logger.info("GRU prediction made in combined endpoint")
             except Exception as e:
                 logger.error(f"GRU prediction failed in combined endpoint: {e}")
