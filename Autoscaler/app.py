@@ -267,24 +267,43 @@ def main_coroutine():
                 try:
                     # Try GRU prediction  
                     if len(traffic_data) >= 105:
-                        gru_pred = predict_with_advanced_gru(steps=1)
+                        gru_pred = predict_with_gru(steps=1)
                         if gru_pred and len(gru_pred) > 0:
                             predictions['gru'] = int(gru_pred[0])
                 except Exception as e:
                     logger.debug(f"GRU prediction failed: {e}")
                 
+                try:
+                    # Try Ensemble prediction (if we have any individual predictions)
+                    if len(traffic_data) >= 10:  # Same threshold as Holt-Winters
+                        ensemble_pred = predict_with_ensemble(steps=1)
+                        if ensemble_pred and len(ensemble_pred) > 0:
+                            predictions['ensemble'] = int(ensemble_pred[0])
+                except Exception as e:
+                    logger.debug(f"Ensemble prediction failed: {e}")
+                
                 # Update Prometheus metrics with all predictions
                 if 'gru' in predictions:
                     predictive_scaler_recommended_replicas.labels(method='gru').set(predictions['gru'])
-                    logger.debug(f"Updated GRU metric: {predictions['gru']}")
+                    logger.info(f"📊 Main loop - Updated GRU metric: {predictions['gru']}")
                 else:
                     predictive_scaler_recommended_replicas.labels(method='gru').set(0)
+                    logger.info("📊 Main loop - Set GRU metric to 0 (no prediction)")
                 
                 if 'holt_winters' in predictions:
-                    predictive_scaler_recommended_replicas.labels(method='holtwinters').set(predictions['holt_winters'])
-                    logger.debug(f"Updated Holt-Winters metric: {predictions['holt_winters']}")
+                    predictive_scaler_recommended_replicas.labels(method='holt_winters').set(predictions['holt_winters'])
+                    logger.info(f"📊 Main loop - Updated Holt-Winters metric: {predictions['holt_winters']}")
                 else:
-                    predictive_scaler_recommended_replicas.labels(method='holtwinters').set(0)
+                    predictive_scaler_recommended_replicas.labels(method='holt_winters').set(0)
+                    logger.info("📊 Main loop - Set Holt-Winters metric to 0 (no prediction)")
+                
+                # Add ensemble metrics export
+                if 'ensemble' in predictions:
+                    predictive_scaler_recommended_replicas.labels(method='ensemble').set(predictions['ensemble'])
+                    logger.info(f"📊 Main loop - Updated Ensemble metric: {predictions['ensemble']}")
+                else:
+                    predictive_scaler_recommended_replicas.labels(method='ensemble').set(0)
+                    logger.info("📊 Main loop - Set Ensemble metric to 0 (no prediction)")
                 
                 # Make scaling decision
                 if predictions:
@@ -453,12 +472,12 @@ def make_prediction_with_model(model_name):
     """Make prediction using specified model"""
     try:
         if model_name == 'gru' and gru_model is not None:
-            return predict_with_advanced_gru(6)
+            return predict_with_gru(6)
         elif model_name == 'holt_winters':
             return predict_with_holtwinters(6)
         elif model_name == 'ensemble':
             # Combine predictions from available models
-            gru_pred = predict_with_advanced_gru(6) if gru_model else None
+            gru_pred = predict_with_gru(6) if gru_model else None
             hw_pred = predict_with_holtwinters(6)
             
             if gru_pred and hw_pred:
@@ -547,7 +566,7 @@ def async_model_training(training_reason, traffic_data_copy, advanced_fallback=T
             # Try advanced model first if we have enough data
             if advanced_fallback and len(traffic_data_copy) >= 30:
                 logger.info("🧠 Attempting advanced GRU model training...")
-                success = build_advanced_gru_model_with_data(traffic_data_copy)
+                success = build_gru_model_with_data(traffic_data_copy)
                 if success:
                     logger.info("✅ Advanced GRU model training succeeded!")
             
@@ -1359,7 +1378,7 @@ def predict_with_ensemble(steps=1):
         # Get GRU prediction (try advanced first, then basic)
         if gru_model is not None and is_model_trained:
             try:
-                gru_pred = predict_with_advanced_gru(steps)
+                gru_pred = predict_with_gru(steps)
                 if not gru_pred:
                     gru_pred = predict_with_gru(steps)
             except Exception:
@@ -1372,7 +1391,7 @@ def predict_with_ensemble(steps=1):
         
         # Get optimized Holt-Winters prediction
         try:
-            hw_pred = predict_with_optimized_holtwinters(steps)
+            hw_pred = predict_with_holtwinters(steps)
             if not hw_pred:
                 hw_pred = predict_with_holtwinters(steps)
         except Exception:
@@ -1523,13 +1542,38 @@ def load_model_components():
             logger.info("No existing GRU model file found")
             return False
         
-        # Load model with error handling
+        # Load model with error handling and compatibility fallback
         try:
             gru_model = tf.keras.models.load_model(MODEL_FILE)
             logger.info(f"GRU model loaded successfully from {MODEL_FILE}")
         except Exception as e:
-            logger.error(f"Failed to load GRU model: {e}")
-            return False
+            logger.error(f"Failed to load GRU model (likely TensorFlow compatibility issue): {e}")
+            logger.info("🔧 Attempting to fix by removing incompatible model files...")
+            
+            # Remove incompatible model files to force retraining
+            try:
+                if os.path.exists(MODEL_FILE):
+                    if os.path.isdir(MODEL_FILE):
+                        import shutil
+                        shutil.rmtree(MODEL_FILE)
+                    else:
+                        os.remove(MODEL_FILE)
+                    logger.info(f"Removed incompatible model file: {MODEL_FILE}")
+                
+                if os.path.exists(SCALER_X_FILE):
+                    os.remove(SCALER_X_FILE)
+                    logger.info(f"Removed incompatible scaler file: {SCALER_X_FILE}")
+                    
+                if os.path.exists(SCALER_Y_FILE):
+                    os.remove(SCALER_Y_FILE)
+                    logger.info(f"Removed incompatible scaler file: {SCALER_Y_FILE}")
+                
+                logger.info("✅ Incompatible model files removed. Model will retrain with current TensorFlow version.")
+                return False  # Return False to trigger retraining
+                
+            except Exception as cleanup_error:
+                logger.error(f"Failed to clean up incompatible model files: {cleanup_error}")
+                return False
         
         # Load scalers with validation
         scalers_loaded = 0
@@ -1654,16 +1698,12 @@ def collect_mse_data_only():
                     try:
                         # Generate GRU prediction
                         if gru_model is not None and is_model_trained:
-                            gru_pred = predict_with_advanced_gru(1)
-                            if not gru_pred:
-                                gru_pred = predict_with_gru(1)
+                            gru_pred = predict_with_gru(1)
                             if gru_pred:
                                 logger.debug(f"MSE Mode - GRU prediction: {gru_pred}")
                         
                         # Generate Holt-Winters prediction  
-                        hw_pred = predict_with_optimized_holtwinters(1)
-                        if not hw_pred:
-                            hw_pred = predict_with_holtwinters(1)
+                        hw_pred = predict_with_holtwinters(1)
                         if hw_pred:
                             logger.debug(f"MSE Mode - HW prediction: {hw_pred}")
                             
@@ -1912,14 +1952,9 @@ def collect_metrics_from_prometheus():
                 # Generate predictions from both models for MSE tracking (EVERY data point after minimum)
                 if len(traffic_data) >= 12:
                     try:
-                        # ALWAYS make Holt-Winters prediction (use optimized version)
+                        # ALWAYS make Holt-Winters prediction
                         logger.info("🔄 Generating background Holt-Winters prediction for MSE tracking...")
-                        try:
-                            hw_pred = predict_with_optimized_holtwinters(1)
-                            if not hw_pred:  # Fallback to basic if optimized fails
-                                hw_pred = predict_with_holtwinters(1)
-                        except Exception:
-                            hw_pred = predict_with_holtwinters(1)
+                        hw_pred = predict_with_holtwinters(1)
                         
                         if hw_pred:
                             logger.info(f"✅ HW prediction: {hw_pred}")
@@ -1930,7 +1965,7 @@ def collect_metrics_from_prometheus():
                         if gru_model is not None and is_model_trained:
                             logger.info("🔄 Generating background GRU prediction for MSE tracking...")
                             try:
-                                gru_pred = predict_with_advanced_gru(1)
+                                gru_pred = predict_with_gru(1)
                                 if not gru_pred:  # Fallback to basic if advanced fails
                                     gru_pred = predict_with_gru(1)
                             except Exception:
@@ -2138,27 +2173,6 @@ def build_gru_model_with_data(data_copy):
         # Always restore original traffic data
         traffic_data[:] = original_traffic_data
 
-def build_advanced_gru_model_with_data(data_copy):
-    """Thread-safe advanced GRU model training with provided data copy."""
-    global gru_model, last_training_time, is_model_trained, scaler_X, scaler_y
-    
-    # Temporarily replace global traffic_data with our copy for preprocessing
-    original_traffic_data = traffic_data[:]
-    traffic_data[:] = data_copy
-    
-    try:
-        # Use the existing build_advanced_gru_model function which is already complete
-        result = build_advanced_gru_model()
-        logger.info(f"✅ Thread-safe advanced GRU training result: {result}")
-        return result
-        
-    except Exception as e:
-        logger.error(f"❌ Thread-safe advanced GRU training failed: {e}")
-        return False
-    finally:
-        # Always restore original traffic data
-        traffic_data[:] = original_traffic_data
-
 def build_gru_model():
     """Build and train GRU model with enhanced error handling and validation."""
     global gru_model, last_training_time, is_model_trained, scaler_X, scaler_y
@@ -2297,161 +2311,7 @@ def build_gru_model():
         training_time.labels(model="gru").set(elapsed_ms)
         return False
 
-def build_advanced_gru_model():
-    """Build an advanced GRU model with enhanced architecture and better preprocessing."""
-    global gru_model, last_training_time, is_model_trained, scaler_X, scaler_y
-    
-    start_time = time.time()
-    gru_config = config["models"]["gru"]
-    
-    try:
-        logger.info(f"🚀 Starting ADVANCED GRU model training with {len(traffic_data)} data points")
-        
-        # Enhanced data preprocessing
-        enhanced_data = create_advanced_features(traffic_data)
-        if enhanced_data is None:
-            logger.warning("Failed to create enhanced features, falling back to basic model")
-            return build_gru_model()  # Fallback to original
-        
-        # Select best features for prediction
-        feature_columns = [
-            'cpu_utilization', 'traffic', 'memory_usage',
-            'cpu_ma_5', 'traffic_ma_5', 'cpu_trend', 'traffic_trend',
-            'load_pressure', 'efficiency', 'cpu_lag1', 'traffic_lag1',
-            'cpu_volatility', 'is_cpu_peak', 'is_traffic_peak',
-            'hour', 'day_of_week'
-        ]
-        
-        # Filter out missing columns
-        available_features = [col for col in feature_columns if col in enhanced_data.columns]
-        logger.info(f"Using {len(available_features)} enhanced features: {available_features}")
-        
-        X, y = preprocess_advanced_data(enhanced_data, available_features, int(gru_config["look_back"]))
-        
-        if X is None or y is None or len(X) < 10:
-            logger.warning(f"Insufficient processed data: {len(X) if X is not None else 0}, falling back to basic model")
-            return build_gru_model()  # Fallback to original
-        
-        # Advanced model architecture
-        input_shape = (X.shape[1], X.shape[2])
-        logger.info(f"Building ADVANCED GRU model with input shape: {input_shape}")
-        
-        # Clear session
-        if gru_model is not None:
-            del gru_model
-            tf.keras.backend.clear_session()
-        
-        # Build sophisticated model with improved architecture
-        model = Sequential([
-            GRU(64, return_sequences=True, input_shape=input_shape, 
-                dropout=0.1, recurrent_dropout=0.1, name='gru_1'),
-            GRU(32, return_sequences=False, name='gru_2'),
-            tf.keras.layers.Dense(32, activation='relu', name='dense_1'),
-            tf.keras.layers.Dropout(0.2, name='dropout_1'),
-            tf.keras.layers.Dense(16, activation='relu', name='dense_2'),
-            tf.keras.layers.Dropout(0.1, name='dropout_2'),
-            tf.keras.layers.Dense(1, name='output')
-        ])
-        
-        # Advanced optimizer with learning rate scheduling
-        initial_learning_rate = 0.001
-        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate,
-            decay_steps=50,
-            decay_rate=0.9,
-            staircase=True
-        )
-        
-        optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-        
-        model.compile(
-            optimizer=optimizer,
-            loss='huber',  # More robust to outliers than MSE
-            metrics=['mae', 'mse']
-        )
-        
-        logger.info("Advanced model compiled, starting training...")
-        
-        # Enhanced training with callbacks
-        callbacks = [
-            tf.keras.callbacks.EarlyStopping(
-                monitor='val_loss', 
-                patience=15, 
-                restore_best_weights=True,
-                verbose=0
-            ),
-            tf.keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss', 
-                factor=0.7, 
-                patience=8, 
-                min_lr=0.0001,
-                verbose=0
-            )
-        ]
-        
-        # Smart batch size and epochs
-        batch_size = min(16, max(4, len(X) // 8))
-        epochs = min(80, max(20, len(X) // 3))
-        
-        history = model.fit(
-            X, y,
-            epochs=epochs,
-            batch_size=batch_size,
-            validation_split=0.2,
-            callbacks=callbacks,
-            verbose=0,
-            shuffle=True
-        )
-        
-        # Enhanced validation
-        final_loss = min(history.history.get('val_loss', history.history['loss'])) if 'val_loss' in history.history else history.history['loss'][-1]
-        logger.info(f"Advanced training completed. Best validation loss: {final_loss:.4f}")
-        
-        # Test prediction
-        try:
-            test_pred = model.predict(X[:1], verbose=0)
-            test_pred_scaled = scaler_y.inverse_transform(test_pred)
-            logger.info(f"Advanced test prediction successful: {test_pred_scaled[0][0]:.2f}")
-        except Exception as e:
-            logger.error(f"Advanced test prediction failed: {e}")
-            return False
-        
-        # Save model
-        try:
-            model.save(MODEL_FILE)
-            joblib.dump(scaler_X, SCALER_X_FILE)
-            joblib.dump(scaler_y, SCALER_Y_FILE)
-            logger.info(f"Advanced model and scalers saved to {MODEL_FILE}, {SCALER_X_FILE}, {SCALER_Y_FILE}")
-        except Exception as e:
-            logger.error(f"Failed to save advanced model: {e}")
-            return False
-        
-        # Update globals
-        gru_model = model
-        is_model_trained = True
-        last_training_time = datetime.now()
-        
-        elapsed_ms = (time.time() - start_time) * 1000
-        training_time.labels(model="gru_advanced").set(elapsed_ms)
-        
-        logger.info(f"🎯 ADVANCED GRU MODEL TRAINED SUCCESSFULLY in {elapsed_ms:.2f}ms")
-        logger.info(f"📊 Model architecture: {len(available_features)} features, enhanced architecture")
-        
-        # Create initial predictions
-        try:
-            logger.info("🚀 Creating initial advanced GRU predictions...")
-            initial_predictions = predict_with_advanced_gru(1)
-            if initial_predictions:
-                logger.info("✅ Initial advanced GRU predictions created successfully")
-        except Exception as e:
-            logger.warning(f"Failed to create initial advanced predictions: {e}")
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error building advanced GRU model: {e}")
-        logger.info("Falling back to basic GRU model...")
-        return build_gru_model()  # Fallback to original implementation
+
 
 def predict_with_holtwinters(steps=None):
     """Predict using Holt-Winters with original hyperparameters."""
@@ -2589,6 +2449,10 @@ def predict_with_gru(steps=None):
         
         logger.info(f"✅ Model shape validation passed: {X_seq.shape} matches {expected_shape}")
         
+        # Initialize prediction variables
+        predicted_replicas = 2  # Default fallback value
+        raw_prediction = 0.0
+        
         # Make prediction
         try:
             y_pred_scaled = gru_model.predict(X_seq, verbose=0)
@@ -2709,210 +2573,14 @@ def optimize_holtwinters_parameters(data, test_size=0.3):
         logger.error(f"Error optimizing Holt-Winters parameters: {e}")
         return None
 
-def predict_with_optimized_holtwinters(steps=None):
-    """Enhanced Holt-Winters with optimized parameters and preprocessing."""
-    start_time_func = time.time()
-    hw_config = config["models"]["holt_winters"]
-    
-    if steps is None:
-        steps = int(hw_config["look_forward"])
-    
-    try:
-        if len(traffic_data) < 20:
-            logger.info("Not enough data for optimized Holt-Winters prediction")
-            return predict_with_holtwinters(steps)  # Fallback to original
-        
-        # Optimize parameters if we have enough data
-        optimal_params = None
-        if len(traffic_data) >= 30:
-            optimal_params = optimize_holtwinters_parameters(traffic_data)
-        
-        # Use more sophisticated data preparation
-        enhanced_data = create_advanced_features(traffic_data)
-        if enhanced_data is not None:
-            # Use smoothed replicas data to reduce noise
-            replicas_smooth = enhanced_data['replicas'].rolling(window=3, center=True).mean().fillna(enhanced_data['replicas'])
-        else:
-            replicas_smooth = pd.Series([d['replicas'] for d in traffic_data[-60:]])
-        
-        # Determine seasonal period based on data patterns
-        seasonal_period = min(12, max(4, len(replicas_smooth) // 5))
-        
-        # Use optimized parameters if available
-        if optimal_params:
-            alpha = optimal_params['alpha']
-            beta = optimal_params['beta']
-            gamma = optimal_params['gamma']
-            logger.info(f"Using optimized HW parameters: α={alpha}, β={beta}, γ={gamma}")
-        else:
-            # Use enhanced default parameters
-            alpha = 0.6  # Slightly higher for more responsiveness
-            beta = 0.1   # Moderate trend sensitivity
-            gamma = 0.4  # Balanced seasonality
-        
-        # Fit enhanced model
-        model = ExponentialSmoothing(
-            replicas_smooth,
-            seasonal_periods=seasonal_period,
-            trend='add',
-            seasonal='add',
-            damped_trend=True
-        ).fit(
-            smoothing_level=alpha,
-            smoothing_trend=beta,
-            smoothing_seasonal=gamma,
-            optimized=True  # Allow further optimization
-        )
-        
-        # Make forecast
-        forecast = model.forecast(steps)
-        
-        # Post-process predictions
-        forecast_processed = []
-        for pred in forecast:
-            # Apply intelligent clipping based on recent trends
-            recent_replicas = replicas_smooth[-5:].values
-            min_reasonable = max(1, int(recent_replicas.min() * 0.7))
-            max_reasonable = min(10, int(recent_replicas.max() * 1.5))
-            
-            processed_pred = max(min_reasonable, min(max_reasonable, round(pred)))
-            forecast_processed.append(processed_pred)
-        
-        # Store prediction with enhanced metadata
-        current_time = datetime.now()
-        timestamp = (current_time + timedelta(seconds=config['collection_interval'])).strftime("%Y-%m-%d %H:%M:%S")
-        add_prediction_to_history('holt_winters', forecast_processed[0], timestamp)
-        
-        # Immediate matching prediction
-        immediate_timestamp = current_time.strftime("%Y-%m-%d %H:%M:%S")
-        add_prediction_to_history('holt_winters', forecast_processed[0], immediate_timestamp)
-        
-        elapsed_ms = (time.time() - start_time_func) * 1000
-        prediction_time.labels(model="holt_winters_optimized").set(elapsed_ms)
-        
-        logger.info(f"✅ Optimized Holt-Winters forecast: {forecast_processed}")
-        return forecast_processed
-        
-    except Exception as e:
-        logger.error(f"Error in optimized Holt-Winters prediction: {e}")
-        return predict_with_holtwinters(steps)  # Fallback to original
 
-def predict_with_advanced_gru(steps=None):
-    """Enhanced GRU prediction using advanced features."""
-    global gru_model, scaler_X, scaler_y
-    start_time_func = time.time()
+
+
+
     
-    gru_config = config["models"]["gru"]
+
     
-    if steps is None:
-        steps = int(gru_config["look_forward"])
-    
-    # Validate model availability
-    if gru_model is None or not is_model_trained:
-        logger.error(f"🚨 Advanced GRU PREDICTION BLOCKED: model={gru_model is not None}, trained={is_model_trained}")
-        return None
-    
-    look_back = int(gru_config["look_back"])
-    
-    if len(traffic_data) < look_back:
-        logger.warning(f"Not enough data for advanced GRU prediction: {len(traffic_data)} < {look_back}")
-        return None
-    
-    try:
-        # Try to use enhanced features if available
-        enhanced_data = create_advanced_features(traffic_data[-look_back:])
-        
-        if enhanced_data is not None:
-            # Use enhanced feature set
-            feature_columns = [
-                'cpu_utilization', 'traffic', 'memory_usage',
-                'cpu_ma_5', 'traffic_ma_5', 'cpu_trend', 'traffic_trend',
-                'load_pressure', 'efficiency', 'cpu_lag1', 'traffic_lag1',
-                'cpu_volatility', 'is_cpu_peak', 'is_traffic_peak',
-                'hour', 'day_of_week'
-            ]
-            
-            # Filter available features
-            available_features = [col for col in feature_columns if col in enhanced_data.columns]
-            
-            if len(available_features) >= 3:
-                X = enhanced_data[available_features].values
-                logger.info(f"✅ Using {len(available_features)} advanced features for prediction")
-            else:
-                # Not enough advanced features available
-                logger.warning("Insufficient advanced features, cannot make prediction")
-                return None
-        else:
-            # Basic features not sufficient for advanced prediction
-            logger.warning("Basic features not sufficient for advanced GRU prediction")
-            return None
-        
-        # Validate scaler compatibility
-        if hasattr(scaler_X, 'n_features_in_') and X.shape[1] != scaler_X.n_features_in_:
-            logger.error(f"Advanced feature mismatch: got {X.shape[1]}, expected {scaler_X.n_features_in_}. Cannot proceed.")
-            return None
-        
-        # Clean data
-        if np.any(np.isnan(X)) or np.any(np.isinf(X)):
-            logger.warning("NaN or infinite values found in advanced prediction data, cleaning...")
-            X = np.nan_to_num(X, nan=0.0, posinf=1000.0, neginf=0.0)
-        
-        # Scale and reshape
-        try:
-            X_scaled = scaler_X.transform(X)
-            X_seq = X_scaled.reshape(1, look_back, len(available_features))
-        except Exception as e:
-            logger.error(f"Error during advanced data scaling: {e}")
-            return None
-        
-        # Validate input shape
-        expected_shape = gru_model.input_shape
-        if X_seq.shape[1:] != expected_shape[1:]:
-            logger.error(f"Advanced shape mismatch: input={X_seq.shape[1:]}, expected={expected_shape[1:]}. Cannot proceed.")
-            return None
-        
-        # Make prediction
-        try:
-            y_pred_scaled = gru_model.predict(X_seq, verbose=0)
-            
-            if y_pred_scaled is None or len(y_pred_scaled) == 0:
-                logger.error("Empty prediction from advanced GRU model")
-                return None
-            
-            # Inverse transform
-            y_pred = scaler_y.inverse_transform(y_pred_scaled)
-            
-            # Validate and sanitize prediction
-            raw_prediction = float(y_pred[0][0])
-            if np.isnan(raw_prediction) or np.isinf(raw_prediction):
-                logger.warning(f"Invalid advanced prediction value: {raw_prediction}, using fallback")
-                predicted_replicas = 2
-            else:
-                predicted_replicas = max(1, min(10, round(raw_prediction)))
-            
-        except Exception as e:
-            logger.error(f"Error during advanced GRU model prediction: {e}")
-            return None
-        
-        # Add prediction to history
-        current_time = datetime.now()
-        timestamp = (current_time + timedelta(seconds=config['collection_interval'])).strftime("%Y-%m-%d %H:%M:%S")
-        add_prediction_to_history('gru', predicted_replicas, timestamp)
-        
-        immediate_timestamp = current_time.strftime("%Y-%m-%d %H:%M:%S")
-        add_prediction_to_history('gru', predicted_replicas, immediate_timestamp)
-        
-        predictions = [predicted_replicas] * steps
-        
-        elapsed_ms = (time.time() - start_time_func) * 1000
-        prediction_time.labels(model="gru_advanced").set(elapsed_ms)
-        
-        logger.info(f"🎯 Advanced GRU forecast SUCCESS: {predictions} (raw: {raw_prediction:.3f})")
-        return predictions
-        
-    except Exception as e:
-        logger.error(f"🚨 Advanced GRU ERROR: {e}")
-        return None
+
 
 def make_scaling_decision_with_minheap(predictions):
     """MinHeap-based scaling decision using MSE-ranked model predictions"""
@@ -3308,7 +2976,7 @@ def get_prediction():
     if gru_model is not None and is_model_trained:
         try:
             start_time_func = time.time()
-            gru_predictions = predict_with_advanced_gru(steps)
+            gru_predictions = predict_with_gru(steps)
             prediction_latency.labels(method="gru").observe(time.time() - start_time_func)
             prediction_requests.labels(method="gru").inc()
             logger.info("GRU prediction made for MSE tracking")
@@ -3402,24 +3070,35 @@ def predict_combined():
         current_cpu = current_metrics['cpu_utilization']
         current_traffic = current_metrics['traffic']
         
-        # ALWAYS make both predictions for MSE tracking
+        # ALWAYS make all predictions for MSE tracking
         gru_predictions = None
         hw_predictions = None
+        ensemble_predictions = None
         
         # Make GRU prediction if available
         if gru_model is not None and is_model_trained:
             try:
-                gru_predictions = predict_with_advanced_gru()
-                logger.info("GRU prediction made in combined endpoint")
+                gru_predictions = predict_with_gru()
+                logger.info(f"GRU prediction made in combined endpoint: {gru_predictions}")
             except Exception as e:
                 logger.error(f"GRU prediction failed in combined endpoint: {e}")
+                gru_predictions = None
         
         # Always make Holt-Winters prediction
         try:
             hw_predictions = predict_with_holtwinters()
-            logger.info("Holt-Winters prediction made in combined endpoint")
+            logger.info(f"Holt-Winters prediction made in combined endpoint: {hw_predictions}")
         except Exception as e:
             logger.error(f"Holt-Winters prediction failed in combined endpoint: {e}")
+            hw_predictions = None
+            
+        # Make Ensemble prediction if we have data
+        try:
+            ensemble_predictions = predict_with_ensemble()
+            logger.info(f"Ensemble prediction made in combined endpoint: {ensemble_predictions}")
+        except Exception as e:
+            logger.error(f"Ensemble prediction failed in combined endpoint: {e}")
+            ensemble_predictions = None
         
         # Select method for scaling decision
         if config['mse_config']['enabled']:
@@ -3438,7 +3117,6 @@ def predict_combined():
             else:
                 method = 'holt_winters'
                 predictions = hw_predictions if hw_predictions else [2]
-                predictions = predict_with_holtwinters()
         
         # Reactive scaling as fallback with improved logic
         if not predictions:
@@ -3475,8 +3153,30 @@ def predict_combined():
         # Make scaling decision with improved logic
         decision, recommended_replicas_value = make_scaling_decision(predictions)
         
-        # Update Prometheus metrics
-        predictive_scaler_recommended_replicas.labels(method=method.lower()).set(recommended_replicas_value)
+        # Update Prometheus metrics for ALL models (not just the selected one)
+        # This ensures Grafana always shows the latest predictions from each model
+        if gru_predictions is not None:
+            gru_value = int(gru_predictions[0]) if len(gru_predictions) > 0 else 0
+            predictive_scaler_recommended_replicas.labels(method='gru').set(gru_value)
+            logger.debug(f"Updated GRU metric in combined endpoint: {gru_value}")
+        else:
+            predictive_scaler_recommended_replicas.labels(method='gru').set(0)
+            
+        if hw_predictions is not None:
+            hw_value = int(hw_predictions[0]) if len(hw_predictions) > 0 else 0
+            predictive_scaler_recommended_replicas.labels(method='holt_winters').set(hw_value)
+            logger.info(f"✅ Updated Holt-Winters metric in combined endpoint: {hw_value}")
+        else:
+            predictive_scaler_recommended_replicas.labels(method='holt_winters').set(0)
+            logger.info("❌ Holt-Winters predictions is None, setting metric to 0")
+            
+        if ensemble_predictions is not None:
+            ensemble_value = int(ensemble_predictions[0]) if len(ensemble_predictions) > 0 else 0
+            predictive_scaler_recommended_replicas.labels(method='ensemble').set(ensemble_value)
+            logger.debug(f"Updated Ensemble metric in combined endpoint: {ensemble_value}")
+        else:
+            predictive_scaler_recommended_replicas.labels(method='ensemble').set(0)
+        
         prediction_requests.labels(method=method).inc()
         scaling_decisions.labels(decision=decision).inc()
         
@@ -3632,7 +3332,7 @@ def initialize():
     
     # Initialize metrics with zero values
     prediction_mse.labels(model="gru").observe(0.0)
-    prediction_mse.labels(model="holtwinters").observe(0.0)
+    prediction_mse.labels(model="holt_winters").observe(0.0)
     current_mse.labels(model="gru").set(-1.0)  # Start with -1 (insufficient data)
     current_mse.labels(model="holt_winters").set(-1.0)
     training_time.labels(model="gru").set(0.0)
@@ -3640,9 +3340,11 @@ def initialize():
     prediction_time.labels(model="gru").set(0.0)
     prediction_time.labels(model="holt_winters").set(0.0)
     predictive_scaler_recommended_replicas.labels(method='gru').set(0)
-    predictive_scaler_recommended_replicas.labels(method='holtwinters').set(0)
+    predictive_scaler_recommended_replicas.labels(method='holt_winters').set(0)
+    predictive_scaler_recommended_replicas.labels(method='ensemble').set(0)
     model_selection.labels(model='gru', reason='initialization').inc(0)
     model_selection.labels(model='holt_winters', reason='initialization').inc(0)
+    model_selection.labels(model='ensemble', reason='initialization').inc(0)
     
     # Initialize HTTP metrics counter
     http_requests.labels(app='predictive-scaler', status_code='200', path='/').inc(0)
@@ -3660,6 +3362,28 @@ def initialize():
     
     # Start collection
     start_collection()
+    
+    # Start the two-coroutine prediction system (essential for metrics updates)
+    if not hasattr(app, '_coroutines_started'):
+        logger.info("🚀 Starting two-coroutine system for predictive scaling...")
+        start_two_coroutine_system()
+        app._coroutines_started = True
+        logger.info("✅ Two-coroutine system started successfully")
+    
+    # Force GRU model training if we have enough data but no working model
+    if not hasattr(app, '_gru_retrain_attempted'):
+        if not is_model_trained and len(traffic_data) >= 110:
+            logger.info("🧠 Sufficient data available, attempting immediate GRU training...")
+            try:
+                success = build_gru_model()
+                if success:
+                    logger.info("✅ GRU model trained successfully during initialization!")
+                else:
+                    logger.info("⏰ GRU training not ready yet, will retry later")
+            except Exception as e:
+                logger.error(f"Failed to train GRU model during initialization: {e}")
+        app._gru_retrain_attempted = True
+    
     logger.info("Predictive scaler initialized successfully")
 
 @app.before_request
@@ -4127,95 +3851,6 @@ def debug_model_comparison():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-@app.route('/predict_enhanced', methods=['GET'])
-def predict_enhanced():
-    """Enhanced prediction endpoint using the best available method including ensemble."""
-    global gru_model, is_model_trained
-    
-    try:
-        steps = request.args.get('steps', default=1, type=int)
-        use_ensemble = request.args.get('ensemble', default='auto', type=str)
-        
-        if not traffic_data:
-            return jsonify({
-                'method_used': 'fallback',
-                'predictions': [1],
-                'recommended_replicas': 1,
-                'error': 'No data available'
-            })
-        
-        # Determine best method
-        predictions = None
-        method_used = None
-        
-        # Check if we should use ensemble
-        if use_ensemble == 'true' or (use_ensemble == 'auto' and len(traffic_data) >= 30):
-            try:
-                predictions = predict_with_ensemble(steps)
-                method_used = 'ensemble'
-                logger.info(f"Using ensemble prediction: {predictions}")
-            except Exception as e:
-                logger.warning(f"Ensemble prediction failed: {e}")
-        
-        # Fallback to best individual model
-        if not predictions:
-            best_model = select_best_model()
-            
-            if best_model == 'gru' and gru_model is not None and is_model_trained:
-                try:
-                    predictions = predict_with_advanced_gru(steps)
-                    if not predictions:
-                        predictions = predict_with_gru(steps)
-                    method_used = 'advanced_gru' if predictions else 'gru'
-                except Exception:
-                    predictions = predict_with_gru(steps)
-                    method_used = 'gru'
-            else:
-                try:
-                    predictions = predict_with_optimized_holtwinters(steps)
-                    if not predictions:
-                        predictions = predict_with_holtwinters(steps)
-                    method_used = 'optimized_holt_winters' if predictions else 'holt_winters'
-                except Exception:
-                    predictions = predict_with_holtwinters(steps)
-                    method_used = 'holt_winters'
-        
-        # Final fallback
-        if not predictions:
-            predictions = [2]
-            method_used = 'fallback'
-        
-        decision, recommended_replicas_value = make_scaling_decision(predictions)
-        
-        # Enhanced metrics
-        enhanced_mse = {}
-        for model in ['gru', 'holt_winters']:
-            if model in predictions_history:
-                enhanced_mse[model] = calculate_enhanced_mse(model)
-        
-        return jsonify({
-            'method_used': method_used,
-            'predictions': predictions,
-            'recommended_replicas': int(recommended_replicas_value),
-            'scaling_decision': decision,
-            'enhanced_metrics': enhanced_mse,
-            'model_performance_summary': {
-                'gru_mse': gru_mse if gru_mse != float('inf') else None,
-                'holt_winters_mse': holt_winters_mse if holt_winters_mse != float('inf') else None,
-                'best_model': select_best_model(),
-                'ensemble_available': len(traffic_data) >= 30
-            }
-        })
-        
-    except Exception as e:
-        logger.error(f"Error in enhanced prediction: {e}")
-        return jsonify({
-            'method_used': 'error_fallback',
-            'predictions': [1],
-            'recommended_replicas': 1,
-            'error': str(e)
-        }), 500
 
 @app.route('/debug/minheap_status', methods=['GET'])
 def debug_minheap_status():
@@ -4718,6 +4353,37 @@ def debug_load_synthetic_file():
         logger.error(f"🔧 DEBUG: Load synthetic file failed: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/debug/test_hw_metric', methods=['POST'])
+def test_hw_metric():
+    """Debug endpoint to directly test Holt-Winters metric export."""
+    try:
+        # Call basic Holt-Winters directly
+        hw_pred = predict_with_holtwinters()
+        logger.info(f"🔧 DEBUG: Direct HW prediction result: {hw_pred}")
+        
+        if hw_pred is not None and len(hw_pred) > 0:
+            hw_value = int(hw_pred[0])
+            predictive_scaler_recommended_replicas.labels(method='holt_winters').set(hw_value)
+            logger.info(f"🔧 DEBUG: Set HW metric directly to: {hw_value}")
+            
+            return jsonify({
+                'success': True,
+                'hw_prediction': hw_pred,
+                'hw_metric_set': hw_value,
+                'message': f'Successfully set holtwinters metric to {hw_value}'
+            })
+        else:
+            logger.warning("🔧 DEBUG: HW prediction returned None or empty")
+            return jsonify({
+                'success': False,
+                'hw_prediction': hw_pred,
+                'message': 'HW prediction returned None or empty'
+            })
+            
+    except Exception as e:
+        logger.error(f"🔧 DEBUG: Test HW metric failed: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 if __name__ == '__main__':
     # Initialize paper-based two-coroutine architecture
     logger.info("🚀 Starting predictive autoscaler with Paper-based Two-Coroutine Architecture...")
@@ -4744,6 +4410,14 @@ if __name__ == '__main__':
     if len(traffic_data) > 0:
         logger.info(f"📈 Found {len(traffic_data)} existing data points")
         
+        # Try to load existing models first
+        logger.info("🔍 Checking for existing trained models...")
+        model_loaded = load_model_components()
+        if model_loaded:
+            logger.info("✅ Pre-trained GRU model loaded successfully")
+        else:
+            logger.info("❌ No pre-trained model found or failed to load")
+        
         # Try to train models if we have enough data
         gru_config = config["models"]["gru"]  # Define gru_config
         min_hw_data = 10
@@ -4761,11 +4435,18 @@ if __name__ == '__main__':
         if len(traffic_data) >= min_gru_data:
             logger.info("🧠 Attempting GRU training with existing data...")
             try:
-                success = build_gru_model()
-                if success:
-                    logger.info("✅ GRU ready with existing data")
+                # If model loading failed, try to build a new one
+                if not model_loaded:
+                    logger.info("🔄 Building new GRU model since loading failed...")
+                    success = build_gru_model()
+                    if success:
+                        logger.info("✅ GRU ready with existing data")
+                else:
+                    logger.info("✅ Using loaded GRU model")
             except Exception as e:
                 logger.info(f"⏰ GRU not ready yet: {e}")
+        elif not model_loaded:
+            logger.info("⏰ Not enough data for GRU training yet, will train when sufficient data is available")
     else:
         logger.info("🆕 Starting fresh - no existing data found")
         logger.info("📊 Beginning real-time data collection for 24-hour realistic scenario")
