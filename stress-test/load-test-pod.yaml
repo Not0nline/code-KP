@@ -7,11 +7,4 @@ spec:
   - name: load-test
     image: python:3.9-slim
     command: ["/bin/bash"]
-    args: ["-c", "pip install requests numpy pandas && python /app/load_test.py --duration 600 --target combined"]
-    volumeMounts:
-    - name: load-test-script
-      mountPath: /app
-  volumes:
-  - name: load-test-script
-    configMap:
-      name: load-test-script
+    args: ["-c", "sleep infinity"]
