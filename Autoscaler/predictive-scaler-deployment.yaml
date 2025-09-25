@@ -40,6 +40,13 @@ spec:
           limits:
             cpu: "500m"
             memory: "1Gi"
+        volumeMounts:
+        - name: data-storage
+          mountPath: /data
+      volumes:
+      - name: data-storage
+        persistentVolumeClaim:
+          claimName: predictive-scaler-pvc
         readinessProbe: # Add probes
           httpGet:
             path: /health
@@ -54,10 +61,3 @@ spec:
           initialDelaySeconds: 30
           periodSeconds: 30
           timeoutSeconds: 5
-        volumeMounts:
-        - name: data-storage
-          mountPath: /data
-      volumes:
-      - name: data-storage
-        persistentVolumeClaim:
-          claimName: predictive-scaler-pvc
