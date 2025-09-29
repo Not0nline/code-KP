@@ -11,3 +11,4 @@ prometheus-api-client>=0.5.0
 scikit-learn>=1.0.0
 joblib>=1.1.0
 typing-extensions>=3.6.6
+kubernetes>=26.1.0

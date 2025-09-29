@@ -382,7 +382,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "predictive_scaler_recommended_replicas{method=\"holtwinters\"}",
+          "expr": "predictive_scaler_recommended_replicas{method=\"holt_winters\"}",
           "legendFormat": "Predicted Replicas (Holt-Winters)",
           "range": true,
           "refId": "D"
@@ -649,6 +649,17 @@
           "legendFormat": "Holt-Winters Model MSE",
           "range": true,
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "current_model_mse{model=\"ensemble\"}",
+          "legendFormat": "Ensemble Model MSE",
+          "range": true,
+          "refId": "C"
         }
       ],
       "title": "Model Prediction MSE (Mean Squared Error)",

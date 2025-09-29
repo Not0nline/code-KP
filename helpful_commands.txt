@@ -67,3 +67,37 @@ kubectl rollout restart deployment predictive-scaler
 
 # see logs 
 kubectl logs -l app=predictive-scaler --tail=20
+
+
+===== Complete logs for mse =====
+
+
+# 1. Check if the new pod is running with the updated image
+kubectl get pods -l app=predictive-scaler
+
+# 2. Check the logs to see if the new code is working
+kubectl logs -l app=predictive-scaler --tail=30
+
+# 3. Start port-forward
+kubectl port-forward service/predictive-scaler 5000:5000 > /dev/null 2>&1 &
+
+# 4. Wait and check the standardized metrics (should only see holt_winters, no more holtwinters)
+sleep 3
+curl -s http://localhost:5000/metrics | grep "predictive_scaler_recommended_replicas"
+
+# 5. Test the predict_combined endpoint
+curl -s http://localhost:5000/predict_combined | jq '.method_used, .recommended_replicas, .predictions'
+
+# 6. Force some predictions to see if metrics update
+curl -X POST -s http://localhost:5000/debug/force_predictions
+
+# 7. Check metrics again after forcing predictions
+curl -s http://localhost:5000/metrics | grep "predictive_scaler_recommended_replicas"
+
+# 8. Check current status
+curl -s http://localhost:5000/status | jq '.data_points, .mse_stats.best_model, .time_until_gru'
+
+# 9. Stop port-forward
+pkill -f "kubectl port-forward.*predictive-scaler"
+
+===============================================
