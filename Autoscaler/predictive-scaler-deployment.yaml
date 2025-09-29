@@ -5,6 +5,12 @@ metadata:
   namespace: default # Ensure namespace matches RBAC
 spec:
   replicas: 1 # Usually only need one predictor instance
+  # Ensure only one pod during rollout to avoid duplicate metrics
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: predictive-scaler
@@ -21,8 +27,12 @@ spec:
         image: 4dri41/predictive-scaler:latest # Use your actual image
         imagePullPolicy: Always
         ports:
-        - containerPort: 5000
+        - name: http
+          containerPort: 5000
         env:
+        # Force single Gunicorn worker to keep Prometheus client single-process
+        - name: GUNICORN_WORKERS
+          value: "1"
         - name: APP_NAME
           value: "predictive-scaler"
         # NEW: Env vars to configure the target for metrics collection
@@ -39,8 +49,8 @@ spec:
             cpu: "100m"
             memory: "512Mi"
           limits:
-            cpu: "500m"
-            memory: "1Gi"
+            cpu: "1Gi"
+            memory: "1.5Gi"
         readinessProbe: # Add probes
           httpGet:
             path: /health
