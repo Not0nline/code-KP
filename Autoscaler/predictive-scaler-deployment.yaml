@@ -49,8 +49,8 @@ spec:
             cpu: "100m"
             memory: "512Mi"
           limits:
-            cpu: "1Gi"
-            memory: "1.5Gi"
+            cpu: "512Mi"
+            memory: "1Gi"
         readinessProbe: # Add probes
           httpGet:
             path: /health
