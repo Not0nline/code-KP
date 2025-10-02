@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir requests kubernetes prometheus_client
 COPY controller.py .
 
 # Set environment variables with defaults (will be overridden by deployment)
-ENV PREDICTIVE_SCALER_SERVICE="http://predictive-scaler:5000/predict" \
+ENV PREDICTIVE_SCALER_SERVICE="http://predictive-scaler:5000" \
     TARGET_DEPLOYMENT="product-app" \
     TARGET_NAMESPACE="default" \
     POLL_INTERVAL="60"

@@ -18,7 +18,7 @@ spec:
         imagePullPolicy: Always
         command: ["/bin/sh", "-c"]
         args:
-          - "gunicorn --workers 1 --bind 0.0.0.0:5000 --timeout 10 app:app"
+          - "gunicorn --workers 2 --threads 2 --bind 0.0.0.0:5000 --timeout 10 app:app"
         ports:
         - name: http-metrics
           containerPort: 5000
@@ -35,8 +35,8 @@ spec:
             cpu: "50m"
             memory: "64Mi"
           limits:
-            cpu: "100m"
-            memory: "128Mi"
+            cpu: "200m"
+            memory: "256Mi"
         env:
         - name: APP_TYPE
           value: "product-app-hpa"

@@ -44,11 +44,30 @@ concurrent_requests = 0
 max_concurrent_requests = 10  # Reject if more than this
 request_lock = threading.Lock()
 
+# Ensure counters exist at startup so Prometheus scrapes have stable series even when idle
+def _initialize_metrics_baseline():
+    try:
+        for code in ('200', '201', '400', '404', '500', '503'):
+            # inc(0) registers the timeseries without changing its value
+            http_requests_total.labels(app=app_type, status_code=code).inc(0)
+        rejected_requests.labels(app=app_type).inc(0)
+        products_count.labels(app=app_type).set(0)
+    except Exception:
+        # Best-effort; don't block app startup
+        pass
+
+_initialize_metrics_baseline()
+
 @app.before_request
 def before_request_timing():
     global concurrent_requests
     
-    # Check if we're overloaded
+    # Always allow fast paths for health and metrics; don't throttle or count concurrency
+    if request.path in ('/metrics', '/health'):
+        request.start_time = time.time()
+        return
+
+    # Check if we're overloaded for application endpoints only
     with request_lock:
         if concurrent_requests >= max_concurrent_requests:
             rejected_requests.labels(app=app_type).inc()
@@ -65,11 +84,13 @@ def before_request_timing():
 def after_request_metrics(response):
     global concurrent_requests
     
-    # Decrement concurrent requests
-    with request_lock:
-        concurrent_requests = max(0, concurrent_requests - 1)
-    
-    http_requests_total.labels(app=app_type, status_code=str(response.status_code)).inc()
+    # Don't track concurrency for health/metrics paths
+    if request.path not in ('/metrics', '/health'):
+        # Decrement concurrent requests
+        with request_lock:
+            concurrent_requests = max(0, concurrent_requests - 1)
+        # Count only application requests in custom metric
+        http_requests_total.labels(app=app_type, status_code=str(response.status_code)).inc()
     return response
 
 @app.route('/product/create', methods=['POST'])

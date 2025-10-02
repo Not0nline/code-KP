@@ -30,10 +30,14 @@ spec:
           value: "60"
         - name: SCALING_THRESHOLD
           value: "0.5"
+        - name: CPU_SCALE_UP_THRESHOLD
+          value: "70"
+        - name: CPU_SCALE_DOWN_THRESHOLD
+          value: "30"
         - name: DEBUG_MODE
           value: "true"
         - name: PROMETHEUS_SERVER
-          value: "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
+          value: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
         resources:
           requests:
             cpu: "100m"

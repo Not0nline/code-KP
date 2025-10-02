@@ -26,6 +26,8 @@ TARGET_NAMESPACE = os.getenv("TARGET_NAMESPACE", "default")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))
 SCALING_COOLDOWN = int(os.getenv("SCALING_COOLDOWN", "120"))
 SCALING_THRESHOLD = float(os.getenv("SCALING_THRESHOLD", "0.7"))
+CPU_SCALE_UP_THRESHOLD = float(os.getenv("CPU_SCALE_UP_THRESHOLD", "70"))
+CPU_SCALE_DOWN_THRESHOLD = float(os.getenv("CPU_SCALE_DOWN_THRESHOLD", "30"))
 MIN_REPLICAS = int(os.getenv("MIN_REPLICAS", "1"))
 MAX_REPLICAS = int(os.getenv("MAX_REPLICAS", "10"))
 PROMETHEUS_SERVER = os.getenv("PROMETHEUS_SERVER", "http://prometheus:9090")
@@ -78,7 +80,16 @@ def determine_replica_count(current_replicas, cpu_utilization, request_rate, pre
     predicted_replicas = prediction_data.get("recommended_replicas", current_replicas) if prediction_data else current_replicas
     
     # Calculate reactive scaling based on current metrics
-    cpu_replicas = math.ceil(current_replicas * (cpu_utilization / TARGET_CPU_UTILIZATION)) if cpu_utilization > 0 else current_replicas
+    # CPU hysteresis: scale up aggressively above 70%, down conservatively below 30%
+    cpu_replicas = current_replicas
+    if cpu_utilization >= CPU_SCALE_UP_THRESHOLD:
+        # scale proportionally above threshold
+        factor = cpu_utilization / max(CPU_SCALE_UP_THRESHOLD, 1)
+        cpu_replicas = max(current_replicas + 1, math.ceil(current_replicas * factor))
+    elif cpu_utilization <= CPU_SCALE_DOWN_THRESHOLD:
+        # scale down one step, but not below min and not below proportional target
+        proportional = max(1, math.floor(current_replicas * (cpu_utilization / max(CPU_SCALE_DOWN_THRESHOLD, 1))))
+        cpu_replicas = min(current_replicas - 1, proportional)
     
     # Use request rate if available
     request_replicas = math.ceil(request_rate / TARGET_REQUESTS_PER_REPLICA) if request_rate > 0 else current_replicas
