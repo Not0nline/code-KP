@@ -24,7 +24,8 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 29,
+  "uid": "predictive-scaling-improved-v2",
+  "id": null,
   "links": [],
   "panels": [
     {
@@ -354,24 +355,14 @@
       },
       "pluginVersion": "12.1.0",
       "targets": [
+        
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "predictive_scaler_recommended_replicas{method=\"ensemble\"}",
-          "legendFormat": "Predicted Replicas (Ensemble)",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "predictive_scaler_recommended_replicas{method=\"gru\"}",
+          "expr": "avg(predictive_scaler_recommended_replicas{service=\"predictive-scaler\", method=\"gru\"})",
           "legendFormat": "Predicted Replicas (GRU)",
           "range": true,
           "refId": "B"
@@ -382,7 +373,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "predictive_scaler_recommended_replicas{method=\"holt_winters\"}",
+            "expr": "avg(predictive_scaler_recommended_replicas{service=\"predictive-scaler\", method=\"holt_winters\"})",
           "legendFormat": "Predicted Replicas (Holt-Winters)",
           "range": true,
           "refId": "D"
@@ -393,7 +384,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "predictive_scaler_actual_replicas",
+            "expr": "avg(predictive_scaler_actual_replicas{service=\"predictive-scaler\"})",
           "legendFormat": "Actual Replicas",
           "range": true,
           "refId": "C"
@@ -634,7 +625,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "current_model_mse{model=\"gru\"}",
+          "expr": "avg(current_model_mse{service=\"predictive-scaler\", model=\"gru\"})",
           "legendFormat": "GRU Model MSE",
           "range": true,
           "refId": "A"
@@ -645,22 +636,11 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "current_model_mse{model=\"holt_winters\"}",
+          "expr": "avg(current_model_mse{service=\"predictive-scaler\", model=\"holt_winters\"})",
           "legendFormat": "Holt-Winters Model MSE",
           "range": true,
           "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "current_model_mse{model=\"ensemble\"}",
-          "legendFormat": "Ensemble Model MSE",
-          "range": true,
-          "refId": "C"
-        }
+  }
       ],
       "title": "Model Prediction MSE (Mean Squared Error)",
       "type": "timeseries"
@@ -1419,7 +1399,7 @@
           "showLineNumbers": false,
           "showMiniMap": false
         },
-        "content": "**Autoscaler Performance Metrics Explanation:**\n\n• **Model Predictions**: Shows how often each AI model (gru, holt_winters, ensemble) makes predictions\n• **Scaling Decisions**: Shows the rate of scaling actions (scale_up, scale_down, maintain)\n• **Prediction Time**: How long each model takes to generate forecasts (lower = faster)\n• **Training Time**: How long GRU neural network training takes (happens rarely)\n\n**Model Variants Explained:**\n- `gru` = Standard GRU neural network\n- `gru_advanced` = Enhanced GRU with advanced features\n- `holt_winters` = Statistical forecasting model\n- `holt_winters_optimized` = Optimized Holt-Winters variant\n\n**Model Selection Reasons:**\n- `low_mse_selected` = Model chosen for excellent accuracy (MSE < 1.0)\n- `medium_mse_selected` = Model chosen for good accuracy (MSE 1.0-5.0)\n- `high_mse_selected` = Model chosen as best available (MSE > 5.0)\n- `initialization` = Default model during startup\n\n**What This Tells You:**\n- High prediction rates = Active autoscaling based on traffic patterns\n- Balanced decision types = Healthy scaling behavior (not stuck scaling up/down)\n- Low prediction times (<100ms) = Models are performing efficiently\n- Training spikes = GRU model being retrained with new data",
+  "content": "**Autoscaler Performance Metrics Explanation:**\n\n• **Model Predictions**: Shows how often each AI model (gru, holt_winters) makes predictions\n• **Scaling Decisions**: Shows the rate of scaling actions (scale_up, scale_down, maintain)\n• **Prediction Time**: How long each model takes to generate forecasts (lower = faster)\n• **Training Time**: How long GRU neural network training takes (happens rarely)\n\n**Model Variants Explained:**\n- `gru` = Standard GRU neural network\n- `gru_advanced` = Enhanced GRU with advanced features\n- `holt_winters` = Statistical forecasting model\n\n**Model Selection Reasons:**\n- `low_mse_selected` = Model chosen for excellent accuracy (MSE < 1.0)\n- `medium_mse_selected` = Model chosen for good accuracy (MSE 1.0-5.0)\n- `high_mse_selected` = Model chosen as best available (MSE > 5.0)\n- `initialization` = Default model during startup\n\n**What This Tells You:**\n- High prediction rates = Active autoscaling based on traffic patterns\n- Balanced decision types = Healthy scaling behavior (not stuck scaling up/down)\n- Low prediction times (<100ms) = Models are performing efficiently\n- Training spikes = GRU model being retrained with new data",
         "mode": "markdown"
       },
       "pluginVersion": "12.1.0",
@@ -2288,6 +2268,5 @@
   "timepicker": {},
   "timezone": "",
   "title": "Predictive Scaling Dashboard - Improved",
-  "uid": "predictive-scaling-improved",
   "version": 2
 }

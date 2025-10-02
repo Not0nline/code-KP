@@ -17,6 +17,12 @@ ENV PYTHONUNBUFFERED=1
 ENV DATA_FILE=/app/data/traffic_data.csv
 ENV MODEL_FILE=/app/data/gru_model
 ENV CONFIG_FILE=/app/data/config.json
+ENV GUNICORN_WORKERS=2
+ENV GUNICORN_THREADS=4
+ENV GUNICORN_TIMEOUT=120
+ENV GUNICORN_GRACEFUL=30
+ENV GUNICORN_KEEPALIVE=5
+ENV GUNICORN_CMD_ARGS="--worker-tmp-dir /dev/shm"
 
 # Use Gunicorn to bind to port 5000 explicitly
-CMD ["sh", "-c", "if [ \"$ENVIRONMENT\" = \"dev\" ]; then python app.py; else gunicorn --bind 0.0.0.0:5000 app:app; fi"]
+CMD ["sh", "-c", "if [ \"$ENVIRONMENT\" = \"dev\" ]; then python app.py; else gunicorn --bind 0.0.0.0:5000 --workers ${GUNICORN_WORKERS:-2} --threads ${GUNICORN_THREADS:-4} --timeout ${GUNICORN_TIMEOUT:-120} --graceful-timeout ${GUNICORN_GRACEFUL:-30} --keep-alive ${GUNICORN_KEEPALIVE:-5} app:app; fi"]

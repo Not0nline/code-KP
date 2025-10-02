@@ -25,14 +25,12 @@ curl -X GET http://localhost:5000/status | jq '.mse_stats'
 # Check enhanced MSE metrics
 curl -X GET http://localhost:5000/debug/enhanced_mse | jq
 
-# Test ensemble prediction
-curl -X POST http://localhost:5000/debug/force_ensemble_prediction | jq
 
 # Compare all models
 curl -X GET http://localhost:5000/debug/model_comparison | jq
 
 # Use enhanced prediction
-curl -X GET http://localhost:5000/predict_enhanced?ensemble=auto | jq
+# Ensemble removed; related endpoints no longer available
 
 
 === For reseting data ===
@@ -60,7 +58,7 @@ curl http://localhost:5000/debug/enhanced_mse | jq
 curl http://localhost:5000/debug/mse_stability | jq
 
 # Force MSE metrics update
-curl -X POST http://localhost:5000/debug/force_mse_update
+curl -X POST http://localhost:8080/debug/force_mse_update
 
 # restart deployment 
 kubectl rollout restart deployment predictive-scaler

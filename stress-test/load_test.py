@@ -506,9 +506,14 @@ class LoadTester:
             for thread in threads:
                 thread.start()
             
-            # Wait for threads to complete
+            # Wait for threads to complete to keep per-second counts equal across services
             for thread in threads:
-                thread.join(timeout=0.95)
+                thread.join()
+
+            # Pace the loop to approximately one-second ticks
+            elapsed_in_second = (datetime.now() - (self.start_time + timedelta(seconds=second))).total_seconds()
+            if elapsed_in_second < 1.0:
+                time.sleep(1.0 - elapsed_in_second)
                 
             # Print progress every 30 seconds
             if second % 30 == 0 and second > 0:
@@ -807,7 +812,7 @@ def parse_arguments():
     parser.add_argument('--hpa-url', type=str, default=DEFAULT_HPA_URL, help='URL for HPA service')
     parser.add_argument('--combined-url', type=str, default=DEFAULT_COMBINED_URL, help='URL for Combined service')
     parser.add_argument('--predictive-url', type=str, default=DEFAULT_PREDICTIVE_URL, help='URL for Predictive Scaler service')
-    parser.add_argument('--test-predictive', action='store_true', default=True, help='Include predictive scaler in testing')
+    parser.add_argument('--test-predictive', action='store_true', default=False, help='Include predictive scaler in testing')
     
     # Test configuration arguments
     parser.add_argument('--duration', type=int, default=1800, help='Test duration in seconds (default: 1800 = 6 complete seasons)')

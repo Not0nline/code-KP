@@ -92,10 +92,10 @@ def create_product():
             logger.error(f'{endpoint_path}: Missing fields: {", ".join(missing_fields)}')
             return jsonify({'error': f'Missing fields: {", ".join(missing_fields)}'}), 400
 
-        # Randomly fail some requests to simulate real-world errors
-        if random.random() < 0.03:  # 3% error rate
-            product_creation_errors.labels(app=app_type).inc()
-            return jsonify({'error': 'Random failure for testing'}), 500
+        # Removed artificial random failures to keep behavior deterministic in tests
+        # if random.random() < 0.03:
+        #     product_creation_errors.labels(app=app_type).inc()
+        #     return jsonify({'error': 'Random failure for testing'}), 500
 
         name = data['name']
         description = data['description']
@@ -131,9 +131,9 @@ def list_products():
     try:
         product_list_requests.labels(app=app_type).inc()
         
-        # Randomly fail some requests
-        if random.random() < 0.00:  # 2% error rate
-            raise Exception("Random failure for testing")
+        # Removed artificial random failures to keep behavior deterministic in tests
+        # if random.random() < 0.00:
+        #     raise Exception("Random failure for testing")
         
         with products_lock:
             products_copy = list(products)

@@ -35,42 +35,51 @@ app = Flask(__name__)
 metrics = PrometheusMetrics(app)  # Exposes /metrics endpoint
 
 # Define Prometheus metrics
+SERVICE_LABEL = os.getenv('APP_NAME', 'predictive-scaler')
+
+# Ensure a consistent 'service' label on custom metrics
+def _labels_with_service(**labels):
+        labels = dict(labels)
+        labels['service'] = SERVICE_LABEL
+        return labels
+
 prediction_requests = Counter('prediction_requests_total', 'Number of prediction requests', 
-                             labelnames=['method'])
+                                                         labelnames=['service','method'])
 scaling_decisions = Counter('scaling_decisions_total', 'Number of scaling decisions', 
-                          labelnames=['decision'])
+                                                    labelnames=['service','decision'])
 prediction_latency = Histogram('prediction_latency_seconds', 'Prediction latency in seconds',
-                             labelnames=['method'])
+                                                         labelnames=['service','method'])
 cpu_utilization = Gauge('current_cpu_utilization', 'Current CPU utilization')
 traffic_gauge = Gauge('current_traffic', 'Current traffic level')
 recommended_replicas = Gauge('recommended_replicas', 'Number of recommended replicas')
 prediction_accuracy = Summary('prediction_accuracy', 'Accuracy of predictions vs actual',
-                            labelnames=['method'])
+                                                        labelnames=['service','method'])
 http_requests = Counter('http_requests_total', 'Total HTTP requests', 
-                       labelnames=['app', 'status_code', 'path'])
+                                             labelnames=['service','app', 'status_code', 'path'])
 http_duration = Histogram('http_request_duration_seconds', 'HTTP request duration',
-                         labelnames=['app'])
+                                                 labelnames=['service','app'])
 
 # Changed MSE from Gauge to Histogram for better graphing
 prediction_mse = Histogram('predictive_scaler_mse', 'Prediction Mean Squared Error', 
-                          labelnames=['model'], 
+                          labelnames=['service','model'], 
                           buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0])
 
 training_time = Gauge('predictive_scaler_training_time_ms', 'Model training time in ms',
-                     labelnames=['model'])
+                     labelnames=['service','model'])
 prediction_time = Gauge('predictive_scaler_prediction_time_ms', 'Prediction time in ms',
-                      labelnames=['model'])
+                      labelnames=['service','model'])
 predictive_scaler_recommended_replicas = Gauge('predictive_scaler_recommended_replicas', 
                                              'Recommended number of replicas', 
-                                             ['method'])
+                                             ['service','method'])
 current_actual_replicas = Gauge('predictive_scaler_actual_replicas', 
-                              'Current actual number of replicas')
+                              'Current actual number of replicas',
+                              labelnames=['service'])
 
 # Enhanced MSE metrics with -1 for invalid states
 current_mse = Gauge('current_model_mse', 'Current MSE for each model (-1 = invalid/insufficient data)', 
-                   labelnames=['model'])
+                   labelnames=['service','model'])
 model_selection = Counter('model_selection_total', 'Number of times each model was selected',
-                         labelnames=['model', 'reason'])
+                         labelnames=['service','model', 'reason'])
 
 # Configure logging
 logging.basicConfig(
@@ -117,9 +126,9 @@ config = {
     "target_namespace": os.getenv('TARGET_NAMESPACE', 'default'),
     "cost_optimization": {
         "enabled": True,
-        "target_cpu_utilization": 75,  # Target higher CPU for efficiency (0-100 scale)
-        "scale_up_threshold": 80,  # Scale up only at very high CPU (0-100 scale)
-        "scale_down_threshold": 20,  # Scale down at higher threshold (0-100 scale)  
+        "target_cpu_utilization": 70,  # Target higher CPU for efficiency (0-100 scale)
+        "scale_up_threshold": 75,  # Scale up only at very high CPU (0-100 scale)
+        "scale_down_threshold": 30,  # Scale down at higher threshold (0-100 scale)  
         "min_replicas": 1,
         "max_replicas": 10,
         "aggressive_scaling": False,  # More conservative scaling
@@ -178,6 +187,11 @@ is_model_trained = False
 last_training_time = None
 start_time = datetime.now()
 prometheus_client = None
+_last_cpu_value = 0.0
+_last_cpu_time = None
+
+# Initialization guards
+_init_lock = threading.Lock()
 
 # Traffic monitoring variables
 low_traffic_start_time = None  # Track when low traffic period started
@@ -188,8 +202,7 @@ consecutive_low_cpu_count = 0  # Track consecutive low CPU measurements
 # Lower MSE = Better model performance = Higher priority in the heap
 predictions_history = {
     'gru': [],
-    'holt_winters': [],
-    'ensemble': []
+    'holt_winters': []
 }
 gru_mse = float('inf')
 holt_winters_mse = float('inf')
@@ -217,6 +230,14 @@ last_gru_retraining = None
 last_holt_winters_update = None
 gru_needs_retraining = False
 
+# Track last scaling decision for observability in /status
+last_scaling_decision_info = {
+    'decision': 'maintain',
+    'replicas': None,
+    'reason': None,
+    'time': None,
+}
+
 # Hybrid initialization configuration
 SYNTHETIC_DATA_ENABLED = False  # Disabled - using real 24-hour collection
 SYNTHETIC_DATA_FILE = 'synthetic_dataset_24h.json'  # Default 24-hour dataset
@@ -225,8 +246,7 @@ using_synthetic_data = False
 synthetic_to_real_transition_time = None
 models_performance_history = {
     'gru': [],
-    'holt_winters': [],
-    'ensemble': []
+    'holt_winters': []
 }
 
 def main_coroutine():
@@ -248,18 +268,16 @@ def main_coroutine():
             # Get current metrics for scaling decision
             current_metrics = collect_single_metric_point()
             if current_metrics:
-                # Only add to traffic_data if CPU is above threshold
+                # Always append to traffic_data to keep a continuous history for matching/predictions
+                with file_lock:  # Thread-safe data access
+                    traffic_data.append(current_metrics)
+                    # Keep sliding window of recent data (last 24 hours up to 1440 points)
+                    if len(traffic_data) > 1440:
+                        traffic_data = traffic_data[-1440:]
                 if current_metrics['cpu_utilization'] >= config['cpu_threshold']:
-                    with file_lock:  # Thread-safe data access
-                        traffic_data.append(current_metrics)
-                    
-                        # Keep sliding window of recent data (last 4 hours)
-                        if len(traffic_data) > 240:  # 4 hours at 60s intervals
-                            traffic_data = traffic_data[-1440:]
-                    
                     logger.debug(f"Main coroutine: Data collected - CPU={current_metrics['cpu_utilization']:.1f}% (above threshold {config['cpu_threshold']}%)")
                 else:
-                    logger.debug(f"Main coroutine: Data skipped - CPU={current_metrics['cpu_utilization']:.1f}% (below threshold {config['cpu_threshold']}%)")
+                    logger.debug(f"Main coroutine: Data collected (idle) - CPU={current_metrics['cpu_utilization']:.1f}% (below threshold {config['cpu_threshold']}%)")
                 
                 # Make predictions using best model from min-heap (only if we have data)
                 best_model = select_best_model_with_minheap()
@@ -288,14 +306,7 @@ def main_coroutine():
                 except Exception as e:
                     logger.debug(f"GRU prediction failed: {e}")
                 
-                try:
-                    # Try Ensemble prediction (if we have any individual predictions)
-                    if len(traffic_data) >= 10:  # Same threshold as Holt-Winters
-                        ensemble_pred = predict_with_ensemble(steps=1)
-                        if ensemble_pred and len(ensemble_pred) > 0:
-                            predictions['ensemble'] = int(ensemble_pred[0])
-                except Exception as e:
-                    logger.debug(f"Ensemble prediction failed: {e}")
+                # Ensemble removed per simplification request
                 
                 # Update Prometheus metrics with all predictions and add to MSE tracking
                 current_time = datetime.now()
@@ -303,64 +314,65 @@ def main_coroutine():
                 future_timestamp_str = (current_time + timedelta(seconds=config['collection_interval'])).strftime("%Y-%m-%d %H:%M:%S")
                 
                 if 'gru' in predictions:
-                    predictive_scaler_recommended_replicas.labels(method='gru').set(predictions['gru'])
+                    predictive_scaler_recommended_replicas.labels(service=SERVICE_LABEL, method='gru').set(predictions['gru'])
                     logger.info(f"📊 Main loop - Updated GRU metric: {predictions['gru']}")
                     # Add GRU prediction to history for MSE tracking
                     add_prediction_to_history('gru', predictions['gru'], future_timestamp_str)
                 else:
-                    predictive_scaler_recommended_replicas.labels(method='gru').set(0)
+                    predictive_scaler_recommended_replicas.labels(service=SERVICE_LABEL, method='gru').set(0)
                     logger.info(f"📊 Main loop - Set GRU metric to 0 (need 20+ data points, have {len(traffic_data)})")
                 
                 if 'holt_winters' in predictions:
-                    predictive_scaler_recommended_replicas.labels(method='holt_winters').set(predictions['holt_winters'])
+                    predictive_scaler_recommended_replicas.labels(service=SERVICE_LABEL, method='holt_winters').set(predictions['holt_winters'])
                     logger.info(f"📊 Main loop - Updated Holt-Winters metric: {predictions['holt_winters']}")
                     # Add Holt-Winters prediction to history for MSE tracking
                     add_prediction_to_history('holt_winters', predictions['holt_winters'], future_timestamp_str)
                 else:
-                    predictive_scaler_recommended_replicas.labels(method='holt_winters').set(0)
+                    predictive_scaler_recommended_replicas.labels(service=SERVICE_LABEL, method='holt_winters').set(0)
                     logger.info(f"📊 Main loop - Set Holt-Winters metric to 0 (need 5+ data points, have {len(traffic_data)})")
                 
-                # Add ensemble metrics export
-                if 'ensemble' in predictions:
-                    predictive_scaler_recommended_replicas.labels(method='ensemble').set(predictions['ensemble'])
-                    logger.info(f"📊 Main loop - Updated Ensemble metric: {predictions['ensemble']}")
-                    # Add ensemble prediction to history for MSE tracking
-                    add_prediction_to_history('ensemble', predictions['ensemble'], future_timestamp_str)
-                else:
-                    predictive_scaler_recommended_replicas.labels(method='ensemble').set(0)
-                    logger.info(f"📊 Main loop - Set Ensemble metric to 0 (need individual predictions first)")
+                # Ensemble metrics removed
                 
                 # Automatically trigger MSE calculation after making predictions
                 update_mse_metrics()
                 
-                # Make scaling decision AND execute it
-                if predictions:
-                    decision, replicas = make_scaling_decision_with_minheap(predictions)
-                    logger.info(f"📊 Main coroutine - Predictions: {predictions}, Decision: {decision}, Replicas: {replicas}")
+                # Make scaling decision AND execute it (even if no model predictions available)
+                decision, replicas = make_scaling_decision_with_minheap(predictions)
+                logger.info(f"📊 Main coroutine - Predictions: {predictions}, Decision: {decision}, Replicas: {replicas}")
+                
+                # ACTUALLY SCALE THE PODS if decision is not "maintain"
+                if decision != "maintain":
+                    target_deployment = config.get('target_deployment', 'product-app-combined')
+                    target_namespace = config.get('target_namespace', 'default')
                     
-                    # ACTUALLY SCALE THE PODS if decision is not "maintain"
-                    if decision != "maintain":
-                        target_deployment = config.get('target_deployment', 'product-app-combined')
-                        target_namespace = config.get('target_namespace', 'default')
-                        
-                        logger.info(f"🚀 EXECUTING SCALING: {decision} {target_deployment} to {replicas} replicas")
-                        
-                        scaling_success = scale_kubernetes_deployment(
-                            deployment_name=target_deployment,
-                            namespace=target_namespace,
-                            target_replicas=replicas
-                        )
-                        
-                        if scaling_success:
-                            logger.info(f"✅ SCALING SUCCESS: {target_deployment} scaled to {replicas} replicas")
-                            # Update scaling metrics for Prometheus
-                            scaling_decisions.labels(decision=decision).inc()
-                        else:
-                            logger.error(f"❌ SCALING FAILED: Could not scale {target_deployment}")
+                    logger.info(f"🚀 EXECUTING SCALING: {decision} {target_deployment} to {replicas} replicas")
+                    
+                    scaling_success = scale_kubernetes_deployment(
+                        deployment_name=target_deployment,
+                        namespace=target_namespace,
+                        target_replicas=replicas
+                    )
+                    
+                    if scaling_success:
+                        logger.info(f"✅ SCALING SUCCESS: {target_deployment} scaled to {replicas} replicas")
+                        # Update scaling metrics for Prometheus
+                        scaling_decisions.labels(service=SERVICE_LABEL, decision=decision).inc()
+                        last_scaling_decision_info.update({
+                            'decision': decision,
+                            'replicas': replicas,
+                            'reason': 'main_coroutine',
+                            'time': datetime.now().isoformat(),
+                        })
                     else:
-                        logger.info(f"🔄 MAINTAINING: Keeping {replicas} replicas (no scaling needed)")
+                        logger.error(f"❌ SCALING FAILED: Could not scale {target_deployment}")
                 else:
-                    logger.info("⏰ No models ready for predictions yet")
+                    logger.info(f"🔄 MAINTAINING: Keeping {replicas} replicas (no scaling needed)")
+                    last_scaling_decision_info.update({
+                        'decision': 'maintain',
+                        'replicas': replicas,
+                        'reason': 'main_coroutine',
+                        'time': datetime.now().isoformat(),
+                    })
             
             # Sleep until next prediction interval
             time.sleep(PREDICTION_INTERVAL)
@@ -438,7 +450,7 @@ def collect_single_metric_point():
         # Update Prometheus metrics
         cpu_utilization.set(current_cpu)
         traffic_gauge.set(current_traffic)
-        current_actual_replicas.set(current_replicas)
+        current_actual_replicas.labels(service=SERVICE_LABEL).set(current_replicas)
         
         return {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -525,16 +537,6 @@ def make_prediction_with_model(model_name):
             return predict_with_gru(6)
         elif model_name == 'holt_winters':
             return predict_with_holtwinters(6)
-        elif model_name == 'ensemble':
-            # Combine predictions from available models
-            gru_pred = predict_with_gru(6) if gru_model else None
-            hw_pred = predict_with_holtwinters(6)
-            
-            if gru_pred and hw_pred:
-                # Weighted average based on recent MSE performance
-                return [(g + h) / 2 for g, h in zip(gru_pred, hw_pred)]
-            else:
-                return hw_pred or gru_pred
         else:
             return predict_with_holtwinters(6)  # Fallback
             
@@ -694,7 +696,7 @@ def scale_kubernetes_deployment(deployment_name, namespace, target_replicas):
                     body=body
                 )
                 logger.info(f"✅ Successfully scaled {deployment_name} to {target_replicas} replicas (API)")
-                current_actual_replicas.set(target_replicas)
+                current_actual_replicas.labels(service=SERVICE_LABEL).set(target_replicas)
                 return True
             except Exception as api_err:
                 logger.error(f"💥 Kubernetes API scaling failed: {api_err}. Falling back to kubectl...")
@@ -714,7 +716,7 @@ def scale_kubernetes_deployment(deployment_name, namespace, target_replicas):
         )
         if result.returncode == 0:
             logger.info(f"✅ Successfully scaled {deployment_name} to {target_replicas} replicas (kubectl)")
-            current_actual_replicas.set(target_replicas)
+            current_actual_replicas.labels(service=SERVICE_LABEL).set(target_replicas)
             return True
         else:
             logger.error(f"❌ kubectl scale failed ({result.returncode}): {result.stderr.strip()}")
@@ -840,17 +842,17 @@ def load_predictions_history():
             if os.path.exists(PREDICTIONS_FILE):
                 with open(PREDICTIONS_FILE, 'r') as f:
                     loaded_history = json.load(f)
-                    # Ensure all model keys exist
-                    predictions_history = {'gru': [], 'holt_winters': [], 'ensemble': []}
+                    # Ensure all model keys exist (ensemble removed)
+                    predictions_history = {'gru': [], 'holt_winters': []}
                     for model_name in predictions_history.keys():
                         if model_name in loaded_history:
                             predictions_history[model_name] = loaded_history[model_name]
                     logger.info("Loaded predictions history for MSE calculation")
             else:
-                predictions_history = {'gru': [], 'holt_winters': [], 'ensemble': []}
+                predictions_history = {'gru': [], 'holt_winters': []}
     except Exception as e:
         logger.error(f"Error loading predictions history: {e}")
-        predictions_history = {'gru': [], 'holt_winters': [], 'ensemble': []}
+    # Keep current predictions_history state on error
 
 def save_predictions_history():
     """Save predictions history for MSE calculation with file locking"""
@@ -1029,10 +1031,24 @@ def add_prediction_to_history(model_name, predicted_replicas, timestamp):
         current_traffic = latest_data['traffic']
         current_replicas = latest_data['replicas']
     
+    # Estimate predicted load for load-based MSE preference
+    try:
+        # Use recent traffic average as a proxy; specific model predictors can refine this later
+        if traffic_data:
+            recent_tr = [d.get('traffic', 0.0) for d in traffic_data[-10:]]
+            predicted_load = float(sum(recent_tr) / max(1, len(recent_tr)))
+        else:
+            predicted_load = None
+    except Exception:
+        predicted_load = None
+
     prediction_entry = {
         'timestamp': timestamp,
         'predicted_replicas': predicted_replicas,
         'actual_replicas': None,  # Will be filled when we get actual data
+        # Prefer load-based matching for MSE when available
+        'predicted_load': predicted_load,
+        'actual_load': None,
         'predicted_cpu': None,
         'actual_cpu': None,
         'context_cpu': current_cpu,  # CPU at time of prediction
@@ -1074,11 +1090,23 @@ def match_new_data_with_predictions(current_replicas, current_cpu, timestamp):
                     pred_time = datetime.strptime(prediction['timestamp'], "%Y-%m-%d %H:%M:%S")
                     delta = (current_time - pred_time).total_seconds()
                     
-                    # Only match if current data point time is AFTER or EQUAL prediction time, within tolerance
-                    match_tolerance = config['mse_config']['prediction_match_tolerance_minutes'] * 60
-                    if 0 <= delta <= match_tolerance:
+                    # Allow timing skew and a broader tolerance window for robust matching
+                    match_tolerance = max(
+                        config['mse_config']['prediction_match_tolerance_minutes'] * 60,
+                        int(config.get('collection_interval', 60)) * 2,
+                        10 * 60
+                    )
+                    skew_slack = max(10, int(config.get('collection_interval', 60)))
+                    if -skew_slack <= delta <= match_tolerance:
                         prediction['actual_replicas'] = current_replicas
                         prediction['actual_cpu'] = current_cpu
+                        # Try to also fill actual_load using current timestamp
+                        try:
+                            # current_traffic is not passed in; derive from traffic_data latest if timestamps align
+                            if traffic_data and traffic_data[-1].get('timestamp') == timestamp:
+                                prediction['actual_load'] = traffic_data[-1].get('traffic')
+                        except Exception:
+                            pass
                         prediction['matched'] = True
                         prediction['match_timestamp'] = timestamp
                         prediction['match_time_diff'] = delta
@@ -1199,7 +1227,7 @@ def update_predictions_with_actual_values():
                 # (i.e., prediction time has passed or is very close)
                 time_since_prediction = (now - pred_time).total_seconds()
                 
-                if time_since_prediction < -120:  # Prediction is more than 2 minutes in future
+                if time_since_prediction < -180:  # Allow a bit more future skew before skipping
                     if debug_mode:
                         logger.debug(f"{model_name}: Prediction {prediction['timestamp']} is {-time_since_prediction:.0f}s in future, skipping")
                     continue
@@ -1207,20 +1235,25 @@ def update_predictions_with_actual_values():
                 # Find the best matching data point
                 best_match = None
                 min_time_diff = float('inf')
-                match_tolerance = config['mse_config']['prediction_match_tolerance_minutes'] * 60
+                match_tolerance = max(
+                    config['mse_config']['prediction_match_tolerance_minutes'] * 60,
+                    int(config.get('collection_interval', 60)) * 2
+                )
 
                 for data_point in traffic_data_with_dt:
                     data_time = data_point['timestamp_dt']
                     delta = (data_time - pred_time).total_seconds()
                     
-                    # Accept only FUTURE-or-equal matches within tolerance window
-                    if 0 <= delta <= match_tolerance and delta < min_time_diff:
+                    # Accept future-or-equal matches; allow small negative delta for skew
+                    skew_slack = max(10, int(config.get('collection_interval', 60)))
+                    if -skew_slack <= delta <= match_tolerance and abs(delta) < min_time_diff:
                         min_time_diff = delta
                         best_match = data_point
                 
                 if best_match:
                     prediction['actual_replicas'] = best_match['replicas']
                     prediction['actual_cpu'] = best_match['cpu_utilization']
+                    prediction['actual_load'] = best_match.get('traffic')
                     prediction['matched'] = True
                     prediction['match_timestamp'] = now.strftime("%Y-%m-%d %H:%M:%S")
                     prediction['match_time_diff'] = min_time_diff
@@ -1232,15 +1265,45 @@ def update_predictions_with_actual_values():
                                   f"predicted={prediction['predicted_replicas']}, actual={best_match['replicas']}, "
                                   f"time_diff={min_time_diff:.0f}s")
                 else:
-                    # Log why no match was found
-                    if debug_mode and time_since_prediction > 60:  # Only log for older predictions
-                        closest_data = min(traffic_data_with_dt, 
-                                         key=lambda x: abs((x['timestamp_dt'] - pred_time).total_seconds()),
-                                         default=None)
+                    # Backfill: if the prediction is older than tolerance and still unmatched,
+                    # pick the closest datapoint within +/- match_tolerance to avoid starving MSE
+                    if time_since_prediction > match_tolerance:
+                        closest = None
+                        closest_abs = float('inf')
+                        for data_point in traffic_data_with_dt:
+                            data_time = data_point['timestamp_dt']
+                            delta_any = (data_time - pred_time).total_seconds()
+                            if abs(delta_any) <= match_tolerance and abs(delta_any) < closest_abs:
+                                closest_abs = abs(delta_any)
+                                closest = data_point
+                        if closest is not None:
+                            prediction['actual_replicas'] = closest['replicas']
+                            prediction['actual_cpu'] = closest['cpu_utilization']
+                            prediction['actual_load'] = closest.get('traffic')
+                            prediction['matched'] = True
+                            prediction['match_timestamp'] = now.strftime("%Y-%m-%d %H:%M:%S")
+                            prediction['match_time_diff'] = (closest['timestamp_dt'] - pred_time).total_seconds()
+                            match_count += 1
+                            model_matches += 1
+                            if debug_mode:
+                                logger.info(f"↩ Backfilled {model_name} prediction: time={prediction['timestamp']}, "
+                                            f"pred={prediction['predicted_replicas']}, actual={closest['replicas']}, "
+                                            f"time_diff={prediction['match_time_diff']:.0f}s")
+                # If still not matched (no best_match and no backfill), log why
+                if not prediction.get('matched', False):
+                    # Log why no match was found (only for older predictions)
+                    if debug_mode and time_since_prediction > 60:
+                        closest_data = min(
+                            traffic_data_with_dt,
+                            key=lambda x: abs((x['timestamp_dt'] - pred_time).total_seconds()),
+                            default=None
+                        )
                         if closest_data:
                             closest_diff = abs((closest_data['timestamp_dt'] - pred_time).total_seconds())
-                            logger.debug(f"✗ No match for {model_name} prediction {prediction['timestamp']}: "
-                                       f"closest data at {closest_data['timestamp']} (diff: {closest_diff:.0f}s)")
+                            logger.debug(
+                                f"✗ No match for {model_name} prediction {prediction['timestamp']}: "
+                                f"closest data at {closest_data['timestamp']} (diff: {closest_diff:.0f}s)"
+                            )
 
             except Exception as e:
                 logger.error(f"Error matching {model_name} prediction: {e}")
@@ -1256,7 +1319,7 @@ def update_predictions_with_actual_values():
         logger.info(f"Matched {match_count} predictions with historical data.")
 
 def calculate_mse_robust(model_name):
-    """Enhanced MSE calculation with aggressive matching and better debugging"""
+    """Enhanced MSE calculation preferring load-based error; fallback to replicas."""
     global predictions_history
     
     if model_name not in predictions_history:
@@ -1267,7 +1330,7 @@ def calculate_mse_robust(model_name):
     matched_predictions = [
         p for p in predictions
         if p.get('matched', False)
-        and p.get('actual_replicas') is not None
+        and (p.get('actual_replicas') is not None or p.get('actual_load') is not None)
         and not p.get('emergency', False)
     ]
     
@@ -1293,38 +1356,63 @@ def calculate_mse_robust(model_name):
             logger.info(f"{model_name} MSE: Need {min_samples} matches, have {matched_count} - waiting for more data")
         return float('inf')
     
-    # Use all available matched predictions (don't limit by window for small datasets)
-    window_size = config['mse_config']['mse_window_size']
-    if matched_count <= 5:  # For small datasets, use all matches
-        recent_predictions = matched_predictions
-    else:
-        recent_predictions = matched_predictions[-window_size:]
+    # Use a rolling window for stability; for small datasets, use all
+    window_size = max(3, int(config['mse_config']['mse_window_size']))
+    recent_predictions = matched_predictions if matched_count <= window_size else matched_predictions[-window_size:]
     
     try:
-        # Calculate MSE for replica predictions
         squared_errors = []
-        prediction_details = []
-        
+        basis = None
+
+        def _nearest_actual_load(ts_str):
+            try:
+                target_ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return None
+            tol = timedelta(minutes=max(1, int(config['mse_config'].get('prediction_match_tolerance_minutes', 5))))
+            closest_val = None
+            closest_dt = None
+            for d in traffic_data[-200:]:
+                try:
+                    dts = datetime.strptime(d.get('timestamp', ''), "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+                if abs(dts - target_ts) <= tol:
+                    if closest_dt is None or abs(dts - target_ts) < abs(closest_dt - target_ts):
+                        closest_dt = dts
+                        closest_val = d.get('traffic')
+            return closest_val
+
+        # Prefer load-based error
         for p in recent_predictions:
-            pred_val = p['predicted_replicas']
-            actual_val = p['actual_replicas']
-            if pred_val is not None and actual_val is not None:
-                error = (pred_val - actual_val) ** 2
-                squared_errors.append(error)
-                prediction_details.append(f"pred={pred_val}, actual={actual_val}, error²={error:.2f}")
-        
+            p_load = p.get('predicted_load')
+            a_load = p.get('actual_load')
+            if a_load is None and p.get('match_timestamp'):
+                a_load = _nearest_actual_load(p['match_timestamp'])
+                if a_load is not None:
+                    p['actual_load'] = a_load
+            if p_load is not None and a_load is not None:
+                err = float(p_load) - float(a_load)
+                squared_errors.append(err * err)
+                basis = 'load'
+
+        # Fallback to replicas-based error if needed
         if not squared_errors:
-            logger.warning(f"{model_name} MSE: No valid prediction pairs found")
+            for p in recent_predictions:
+                pred_val = p.get('predicted_replicas')
+                actual_val = p.get('actual_replicas')
+                if pred_val is not None and actual_val is not None:
+                    error = (float(pred_val) - float(actual_val)) ** 2
+                    squared_errors.append(error)
+                    basis = 'replicas'
+
+        if not squared_errors:
+            logger.warning(f"{model_name} MSE: No valid data pairs (load or replicas)")
             return float('inf')
-        
-        mse_value = np.mean(squared_errors)
-        
-        # Always log successful MSE calculation
-        logger.info(f"🎯 {model_name} MSE: {mse_value:.4f} (from {len(squared_errors)} samples)")
-        
-        if debug_mode:
-            logger.debug(f"{model_name} MSE details: {prediction_details}")
-        
+
+        mse_value = float(np.mean(squared_errors))
+        logger.info(f"🎯 {model_name} MSE ({basis or 'unknown'}): {mse_value:.4f} (from {len(squared_errors)} samples)")
+        logger.debug(f"{model_name} MSE window: {len(recent_predictions)} samples (window_size={window_size})")
         return mse_value
         
     except Exception as e:
@@ -1361,37 +1449,27 @@ def update_mse_metrics():
         except Exception as e:
             logger.warning(f"Holt-Winters MSE calculation failed, keeping previous value: {e}")
             
-        # Calculate ensemble MSE
-        try:
-            ensemble_mse = calculate_mse_robust('ensemble')
-        except Exception as e:
-            logger.warning(f"Ensemble MSE calculation failed: {e}")
-            ensemble_mse = float('inf')
+        # Ensemble removed
             
     except Exception as e:
         logger.error(f"MSE update process failed: {e}")
         # Don't update MSE values if the whole process fails
-        ensemble_mse = float('inf')
     
     # Update Prometheus metrics with stability protection
     try:
         if gru_mse != float('inf') and gru_mse >= 0:  # Allow MSE = 0.0 (perfect predictions)
-            prediction_mse.labels(model='gru').observe(gru_mse)
-            current_mse.labels(model='gru').set(gru_mse)
+            prediction_mse.labels(service=SERVICE_LABEL, model='gru').observe(gru_mse)
+            current_mse.labels(service=SERVICE_LABEL, model='gru').set(gru_mse)
         elif gru_mse == float('inf'):
-            current_mse.labels(model='gru').set(-1)  # Signal insufficient data
+            current_mse.labels(service=SERVICE_LABEL, model='gru').set(-1)  # Signal insufficient data
         
         if holt_winters_mse != float('inf') and holt_winters_mse >= 0:  # Allow MSE = 0.0 (perfect predictions)
-            prediction_mse.labels(model='holt_winters').observe(holt_winters_mse)
-            current_mse.labels(model='holt_winters').set(holt_winters_mse)
+            prediction_mse.labels(service=SERVICE_LABEL, model='holt_winters').observe(holt_winters_mse)
+            current_mse.labels(service=SERVICE_LABEL, model='holt_winters').set(holt_winters_mse)
         elif holt_winters_mse == float('inf'):
-            current_mse.labels(model='holt_winters').set(-1)  # Signal insufficient data
+            current_mse.labels(service=SERVICE_LABEL, model='holt_winters').set(-1)  # Signal insufficient data
             
-        if ensemble_mse != float('inf') and ensemble_mse >= 0:  # Allow MSE = 0.0 (perfect predictions)
-            prediction_mse.labels(model='ensemble').observe(ensemble_mse)
-            current_mse.labels(model='ensemble').set(ensemble_mse)
-        elif ensemble_mse == float('inf'):
-            current_mse.labels(model='ensemble').set(-1)  # Signal insufficient data
+        # Ensemble metrics removed
             
     except Exception as e:
         logger.error(f"Failed to update Prometheus metrics: {e}")
@@ -1401,8 +1479,6 @@ def update_mse_metrics():
     # Enhanced logging with anomaly detection
     gru_status = f"{gru_mse:.3f}" if gru_mse != float('inf') else "insufficient_data"
     hw_status = f"{holt_winters_mse:.3f}" if holt_winters_mse != float('inf') else "insufficient_data"
-    ensemble_status = f"{ensemble_mse:.3f}" if ensemble_mse != float('inf') else "insufficient_data"
-    
     # Detect and log MSE anomalies (sudden drops to 0 or -1)
     if previous_gru_mse != float('inf') and previous_gru_mse > 5 and gru_mse == float('inf'):
         logger.warning(f"🚨 GRU MSE dropped from {previous_gru_mse:.3f} to insufficient_data - possible calculation issue")
@@ -1410,7 +1486,7 @@ def update_mse_metrics():
     if previous_hw_mse != float('inf') and previous_hw_mse > 5 and holt_winters_mse == float('inf'):
         logger.warning(f"🚨 Holt-Winters MSE dropped from {previous_hw_mse:.3f} to insufficient_data - possible calculation issue")
     
-    logger.info(f"MSE Update - GRU: {gru_status}, Holt-Winters: {hw_status}, Ensemble: {ensemble_status}")
+    logger.info(f"MSE Update - GRU: {gru_status}, Holt-Winters: {hw_status}")
 
 def calculate_enhanced_mse(model_name):
     """Calculate multiple accuracy metrics beyond just MSE."""
@@ -1475,83 +1551,7 @@ def calculate_enhanced_mse(model_name):
             'samples': 0
         }
 
-def predict_with_ensemble(steps=1):
-    """Ensemble prediction combining multiple models for best accuracy."""
-    global gru_model, is_model_trained
-    try:
-        predictions = {}
-        weights = {}
-        
-        # Get GRU prediction (try advanced first, then basic)
-        if gru_model is not None and is_model_trained:
-            try:
-                gru_pred = predict_with_gru(steps)
-                if not gru_pred:
-                    gru_pred = predict_with_gru(steps)
-            except Exception:
-                gru_pred = predict_with_gru(steps)
-            
-            if gru_pred:
-                predictions['gru'] = gru_pred[0]
-                gru_weight = 1 / (gru_mse + 0.1) if gru_mse != float('inf') else 0.1
-                weights['gru'] = gru_weight
-        
-        # Get optimized Holt-Winters prediction
-        try:
-            hw_pred = predict_with_holtwinters(steps)
-            if not hw_pred:
-                hw_pred = predict_with_holtwinters(steps)
-        except Exception:
-            hw_pred = predict_with_holtwinters(steps)
-            
-        if hw_pred:
-            predictions['holt_winters'] = hw_pred[0]
-            hw_weight = 1 / (holt_winters_mse + 0.1) if holt_winters_mse != float('inf') else 0.1
-            weights['holt_winters'] = hw_weight
-        
-        # Simple moving average prediction (baseline)
-        if len(traffic_data) >= 5:
-            recent_replicas = [d['replicas'] for d in traffic_data[-5:]]
-            ma_pred = int(round(np.mean(recent_replicas)))
-            predictions['moving_average'] = ma_pred
-            weights['moving_average'] = 0.2
-        
-        # Linear trend prediction
-        if len(traffic_data) >= 10:
-            recent_replicas = [d['replicas'] for d in traffic_data[-10:]]
-            x = np.arange(len(recent_replicas))
-            z = np.polyfit(x, recent_replicas, 1)
-            trend_pred = max(1, min(10, int(round(z[0] * len(recent_replicas) + z[1]))))
-            predictions['trend'] = trend_pred
-            weights['trend'] = 0.3
-        
-        if not predictions:
-            return [2]  # Fallback
-        
-        # Calculate weighted ensemble prediction
-        total_weight = sum(weights.values())
-        if total_weight == 0:
-            ensemble_pred = int(np.mean(list(predictions.values())))
-        else:
-            weighted_sum = sum(pred * weights[method] for method, pred in predictions.items())
-            ensemble_pred = max(1, min(10, int(round(weighted_sum / total_weight))))
-        
-        logger.info(f"🎭 Ensemble prediction: {ensemble_pred} from {predictions} with weights {weights}")
-        
-        # Store ensemble prediction for tracking
-        current_time = datetime.now()
-        timestamp = (current_time + timedelta(seconds=config['collection_interval'])).strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Add ensemble to prediction history
-        if 'ensemble' not in predictions_history:
-            predictions_history['ensemble'] = []
-        add_prediction_to_history('ensemble', ensemble_pred, timestamp)
-        
-        return [ensemble_pred]
-        
-    except Exception as e:
-        logger.error(f"Error in ensemble prediction: {e}")
-        return [2]  # Safe fallback
+# Ensemble prediction removed
 
 def select_best_model_with_minheap():
     """MinHeap-based model selection using MSE as the primary criterion"""
@@ -1575,11 +1575,7 @@ def select_best_model_with_minheap():
     heapq.heappush(model_heap, (hw_mse_value, 'holt_winters', True))
     logger.debug(f"Added Holt-Winters to minheap: MSE={hw_mse_value}")
     
-    # Add ensemble model if we have predictions from multiple models
-    ensemble_mse = calculate_ensemble_mse()
-    if ensemble_mse != float('inf'):
-        heapq.heappush(model_heap, (ensemble_mse, 'ensemble', True))
-        logger.debug(f"Added Ensemble to minheap: MSE={ensemble_mse}")
+    # Ensemble removed from minheap
     
     # Select models based on minheap (lowest MSE first)
     selected_models = []
@@ -1597,7 +1593,7 @@ def select_best_model_with_minheap():
     
     if not selected_models:
         # Ultimate fallback
-        model_selection.labels(model='holt_winters', reason='minheap_ultimate_fallback').inc()
+        model_selection.labels(service=SERVICE_LABEL, model='holt_winters', reason='minheap_ultimate_fallback').inc()
         logger.error("❌ MinHeap selection failed, using ultimate fallback")
         return 'holt_winters'
     
@@ -1607,10 +1603,10 @@ def select_best_model_with_minheap():
     # Check if MSE is disabled
     if not config['mse_config']['enabled']:
         if is_model_trained and gru_model is not None:
-            model_selection.labels(model='gru', reason='mse_disabled_prefer_gru').inc()
+            model_selection.labels(service=SERVICE_LABEL, model='gru', reason='mse_disabled_prefer_gru').inc()
             return 'gru'
         else:
-            model_selection.labels(model='holt_winters', reason='mse_disabled_fallback').inc()
+            model_selection.labels(service=SERVICE_LABEL, model='holt_winters', reason='mse_disabled_fallback').inc()
             return 'holt_winters'
     
     # Log minheap decision with simplified reason
@@ -1620,20 +1616,12 @@ def select_best_model_with_minheap():
         reason = "medium_mse_selected"
     else:
         reason = "high_mse_selected"
-    model_selection.labels(model=best_model, reason=reason).inc()
+    model_selection.labels(service=SERVICE_LABEL, model=best_model, reason=reason).inc()
     
     logger.info(f"🎯 MinHeap final selection: {best_model} (MSE: {best_mse:.4f})")
     return best_model
 
-def calculate_ensemble_mse():
-    """Calculate MSE for ensemble predictions if available"""
-    try:
-        if 'ensemble' in predictions_history:
-            return calculate_mse_robust('ensemble')
-        return float('inf')
-    except Exception as e:
-        logger.debug(f"Failed to calculate ensemble MSE: {e}")
-        return float('inf')
+# Ensemble removed: no ensemble MSE calculation
 
 def select_best_model():
     """Enhanced model selection using MinHeap system for MSE-based decisions"""
@@ -1784,7 +1772,7 @@ def collect_mse_data_only():
             current_replicas = int(float(replicas_result[0]['value'][1])) if replicas_result else 1
             
             # Update actual replicas metric
-            current_actual_replicas.set(current_replicas)
+            current_actual_replicas.labels(service=SERVICE_LABEL).set(current_replicas)
             
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
@@ -1897,6 +1885,9 @@ def get_current_cpu_from_prometheus():
                         # Accept percentage values
                         if cpu_value >= 0:
                             logger.info(f"🎯 Selected CPU query {i} ({description}): {cpu_value:.4f}%")
+                            # Cache and return
+                            globals()['_last_cpu_value'] = cpu_value
+                            globals()['_last_cpu_time'] = datetime.now()
                             return cpu_value
                             
                     elif expected_format == 'cores_converted':
@@ -1906,12 +1897,16 @@ def get_current_cpu_from_prometheus():
                         logger.info(f"🔧 Processing cores format: {cpu_value:.4f}")
                         if cpu_value >= 0:
                             logger.info(f"🎯 Selected CPU query {i} ({description}): {cpu_value:.4f}% (cores-based)")
+                            globals()['_last_cpu_value'] = cpu_value
+                            globals()['_last_cpu_time'] = datetime.now()
                             return cpu_value
                     
                     else:
                         # Unknown format, accept if reasonable
                         if cpu_value >= 0:
                             logger.info(f"🎯 Selected CPU query {i} ({description}): {cpu_value:.4f}% (unknown format)")
+                            globals()['_last_cpu_value'] = cpu_value
+                            globals()['_last_cpu_time'] = datetime.now()
                             return cpu_value
                 else:
                     logger.warning(f"❌ CPU query {i} returned no results")
@@ -1947,23 +1942,28 @@ def get_current_cpu_from_prometheus():
         except Exception as discovery_error:
             logger.error(f"💥 Metric discovery failed: {discovery_error}")
         
+        # If all queries fail, return last known CPU if recent
+        if _last_cpu_time and (datetime.now() - _last_cpu_time).total_seconds() < 120:
+            logger.warning("Using cached CPU value due to query failures")
+            return _last_cpu_value
         logger.error("💥 All CPU queries failed, returning 0.0")
         return 0.0
         
     except Exception as e:
         logger.error(f"💥 Error getting current CPU: {e}")
+        # Return cached value if not too old to avoid blocking
+        if _last_cpu_time and (datetime.now() - _last_cpu_time).total_seconds() < 120:
+            return _last_cpu_value
         return 0.0
 
 def collect_metrics_from_prometheus():
-    """Collect real metrics from Prometheus with 4-hour collection limit and MSE mode"""
+    """Collect real metrics from Prometheus continuously (no synthetic/MSE-only mode)."""
     global traffic_data, is_collecting, last_training_time, low_traffic_start_time, consecutive_low_cpu_count
     global data_collection_complete, data_collection_start_time, gru_model, is_model_trained
     
-    # If 4-hour collection is complete, switch to MSE-only mode
+    # Continue normal collection even after 4-hour milestone (no mode switch)
     if data_collection_complete:
-        logger.info("4-hour training dataset complete. Switching to MSE-only data collection mode.")
-        collect_mse_data_only()
-        return
+        logger.info("4-hour training dataset milestone reached. Continuing real data collection (no reset, no synthetic).")
     
     # Set collection start time if not already set
     if data_collection_start_time is None:
@@ -2010,7 +2010,7 @@ def collect_metrics_from_prometheus():
             current_replicas = int(float(replicas_result[0]['value'][1])) if replicas_result else 1
             
             # Update actual replicas metric
-            current_actual_replicas.set(current_replicas)
+            current_actual_replicas.labels(service=SERVICE_LABEL).set(current_replicas)
             
             # Track idle time
             if current_traffic < config['cost_optimization']['zero_traffic_threshold'] and current_cpu < config['cpu_threshold']:
@@ -2177,22 +2177,14 @@ def collect_metrics_from_prometheus():
                 # Each data point represents ~1 minute of runtime (collection_interval = 60s)
                 runtime_hours = len(traffic_data) / 60  # Approximate runtime hours based on data points
                 
-                if runtime_hours >= 4:  # 4-hour collection period
+                if runtime_hours >= 4 and not data_collection_complete:
+                    # Mark milestone and snapshot a training dataset, but DO NOT reset or stop collection
                     data_collection_complete = True
-                    
-                    # Save the 4-hour dataset as permanent training data
                     global training_dataset
-                    training_dataset = traffic_data.copy()  # Preserve the complete 4-hour dataset
-                    
+                    training_dataset = traffic_data.copy()
                     save_collection_status()
-                    save_data()  # Save the final dataset
-                    logger.info(f"✅ 4-hour runtime completed! Collected {len(traffic_data)} data points for testing.")
-                    logger.info(f"� Training dataset locked: {len(training_dataset)} data points saved permanently")
-                    logger.info("🔄 Switching to MSE-only mode for prediction accuracy measurement")
-                    
-                    # Clear current traffic_data to start fresh for MSE tracking
-                    traffic_data = []
-                    break
+                    save_data()
+                    logger.info(f"✅ 4-hour runtime milestone reached. Snapshot training dataset size: {len(training_dataset)}. Continuing collection.")
             
             # Sleep for the collection interval
             time.sleep(config['collection_interval'])
@@ -2303,7 +2295,7 @@ def build_gru_model():
         if len(traffic_data) < min_data_points:
             logger.warning(f"Insufficient data for GRU training: {len(traffic_data)} < {min_data_points}")
             elapsed_ms = (time.time() - start_time) * 1000
-            training_time.labels(model="gru").set(elapsed_ms)
+            training_time.labels(service=SERVICE_LABEL, model="gru").set(elapsed_ms)
             return False
         
         # Preprocess data
@@ -2312,13 +2304,13 @@ def build_gru_model():
         if X is None or y is None:
             logger.error("Failed to preprocess data for GRU model")
             elapsed_ms = (time.time() - start_time) * 1000
-            training_time.labels(model="gru").set(elapsed_ms)
+            training_time.labels(service=SERVICE_LABEL, model="gru").set(elapsed_ms)
             return False
             
         if len(X) < 10:
             logger.warning(f"Not enough sequences for GRU training: {len(X)} < 10")
             elapsed_ms = (time.time() - start_time) * 1000
-            training_time.labels(model="gru").set(elapsed_ms)
+            training_time.labels(service=SERVICE_LABEL, model="gru").set(elapsed_ms)
             return False
         
         logger.info(f"Training data prepared: X shape {X.shape}, y shape {y.shape}")
@@ -2380,7 +2372,7 @@ def build_gru_model():
         except Exception as e:
             logger.error(f"Test prediction failed: {e}")
             elapsed_ms = (time.time() - start_time) * 1000
-            training_time.labels(model="gru").set(elapsed_ms)
+            training_time.labels(service=SERVICE_LABEL, model="gru").set(elapsed_ms)
             return False
         
         # Save model and scalers
@@ -2392,7 +2384,7 @@ def build_gru_model():
         except Exception as e:
             logger.error(f"Failed to save model: {e}")
             elapsed_ms = (time.time() - start_time) * 1000
-            training_time.labels(model="gru").set(elapsed_ms)
+            training_time.labels(service=SERVICE_LABEL, model="gru").set(elapsed_ms)
             return False
         
         # Update global variables
@@ -2402,7 +2394,7 @@ def build_gru_model():
         
         # Record training time
         elapsed_ms = (time.time() - start_time) * 1000
-        training_time.labels(model="gru").set(elapsed_ms)
+        training_time.labels(service=SERVICE_LABEL, model="gru").set(elapsed_ms)
         
         logger.info(f"🎯 GRU MODEL TRAINED SUCCESSFULLY in {elapsed_ms:.2f}ms with {len(X)} samples")
         logger.info(f"📊 Final model state: input_shape={gru_model.input_shape}, is_trained={is_model_trained}")
@@ -2423,7 +2415,7 @@ def build_gru_model():
     except Exception as e:
         logger.error(f"Error building GRU model: {e}")
         elapsed_ms = (time.time() - start_time) * 1000
-        training_time.labels(model="gru").set(elapsed_ms)
+        training_time.labels(service=SERVICE_LABEL, model="gru").set(elapsed_ms)
         return False
 
 
@@ -2446,6 +2438,37 @@ def predict_with_holtwinters(steps=None):
 
         # Use replicas history (last 5 minutes)
         replicas = [d['replicas'] for d in prediction_data[-60:]]
+
+        # If replicas series is constant or insufficiently variable, fall back to CPU-based scaling heuristic
+        if len(replicas) >= 3 and (max(replicas) - min(replicas) == 0):
+            try:
+                current = prediction_data[-1]
+                current_replicas = int(current.get('replicas', 1))
+                current_cpu = float(current.get('cpu_utilization', 0))
+                target_cpu = float(config.get('cost_optimization', {}).get('target_cpu_utilization', 75))
+                # Compute recommended replicas to achieve target CPU
+                rec = max(1, int(np.ceil((current_cpu / max(target_cpu, 1e-6)) * current_replicas / 100.0 * 100)))
+                # Clip to bounds
+                rec = max(config['cost_optimization'].get('min_replicas', 1), min(config['cost_optimization'].get('max_replicas', 10), rec))
+                forecast = [rec] * steps
+                # Record for next interval to track MSE
+                current_time = datetime.now()
+                future_timestamp = (current_time + timedelta(seconds=config['collection_interval'])).strftime("%Y-%m-%d %H:%M:%S")
+                # Avoid duplicate records for the exact same future timestamp
+                try:
+                    last_hw = predictions_history.get('holt_winters', [])[-1] if predictions_history.get('holt_winters') else None
+                    if not last_hw or last_hw.get('timestamp') != future_timestamp:
+                        add_prediction_to_history('holt_winters', forecast[0], future_timestamp)
+                    else:
+                        logger.debug("Skipping duplicate HW prediction record for same future timestamp")
+                except Exception:
+                    add_prediction_to_history('holt_winters', forecast[0], future_timestamp)
+                elapsed_ms = (time.time() - start_time_func) * 1000
+                prediction_time.labels(service=SERVICE_LABEL, model="holt_winters").set(elapsed_ms)
+                logger.info(f"Holt-Winters CPU-fallback forecast: {forecast} (cpu={current_cpu:.1f}%, replicas={current_replicas}, target={target_cpu}%)")
+                return forecast
+            except Exception as e:
+                logger.debug(f"HW CPU-fallback failed, continuing with time-series model: {e}")
 
         # Fit Holt-Winters with adaptive seasonality based on data availability
         seasonal_periods = int(hw_config["slen"])
@@ -2479,15 +2502,23 @@ def predict_with_holtwinters(steps=None):
         forecast = model.forecast(steps).tolist()
 
         # Round and clip predictions
-        forecast = [max(1, min(10, round(p))) for p in forecast]
+        forecast = [max(config['cost_optimization'].get('min_replicas', 1), min(config['cost_optimization'].get('max_replicas', 10), round(p))) for p in forecast]
 
         # Record prediction for the NEXT interval only (future timestamp) to avoid self-matching
         current_time = datetime.now()
         future_timestamp = (current_time + timedelta(seconds=config['collection_interval'])).strftime("%Y-%m-%d %H:%M:%S")
-        add_prediction_to_history('holt_winters', forecast[0], future_timestamp)
+        # Avoid duplicate records for the exact same future timestamp
+        try:
+            last_hw = predictions_history.get('holt_winters', [])[-1] if predictions_history.get('holt_winters') else None
+            if not last_hw or last_hw.get('timestamp') != future_timestamp:
+                add_prediction_to_history('holt_winters', forecast[0], future_timestamp)
+            else:
+                logger.debug("Skipping duplicate HW prediction record for same future timestamp")
+        except Exception:
+            add_prediction_to_history('holt_winters', forecast[0], future_timestamp)
 
         elapsed_ms = (time.time() - start_time_func) * 1000
-        prediction_time.labels(model="holt_winters").set(elapsed_ms)
+        prediction_time.labels(service=SERVICE_LABEL, model="holt_winters").set(elapsed_ms)
 
         logger.info(f"Holt-Winters forecast generated: {forecast}")
         return forecast
@@ -2612,7 +2643,7 @@ def predict_with_gru(steps=None):
 
         # Record prediction time
         elapsed_ms = (time.time() - start_time_func) * 1000
-        prediction_time.labels(model="gru").set(elapsed_ms)
+        prediction_time.labels(service=SERVICE_LABEL, model="gru").set(elapsed_ms)
 
         logger.info(f"🎯 GRU forecast SUCCESS: {predictions} (raw: {raw_prediction:.3f})")
         return predictions
@@ -2729,6 +2760,7 @@ def make_scaling_decision_with_minheap(predictions):
         scale_down_delay = cost_config.get('scale_down_delay_minutes', 2) * 60
         idle_scale_minutes = cost_config.get('idle_scale_down_minutes', 5)
         zero_traffic_threshold = cost_config.get('zero_traffic_threshold', 0.1)
+        target_cpu = cost_config.get('target_cpu_utilization', 75)
         
         # Priority 1: Emergency scale down for idle periods (highest priority)
         if low_traffic_start_time is not None:
@@ -2742,15 +2774,35 @@ def make_scaling_decision_with_minheap(predictions):
                 recommended = max(min_replicas, current_replicas - 1)
                 heapq.heappush(decision_heap, (2.0, "scale_down", recommended, f"sustained_low_cpu_{consecutive_low_cpu_count}"))
         
-        # Priority 3: High CPU requires scale up (only for extreme cases)
+        # Priority 1.5: Emergency very high CPU scale up (outranks predictive decisions)
+        if current_cpu >= 90:
+            # Immediate proportional step without cooldown to avoid overload
+            overload = max(0.0, current_cpu - target_cpu)
+            step = max(2, int(np.ceil((overload / max(1.0, target_cpu)) * current_replicas)))
+            recommended = min(max_replicas_limit, current_replicas + step)
+            heapq.heappush(decision_heap, (0.5, "scale_up", recommended, f"emergency_high_cpu_{current_cpu:.1f}%_step{step}"))
+
+        # Priority 3: High CPU requires scale up (reactive)
         if current_cpu > scale_up_threshold:
-            if current_time - last_scale_up_time >= 30:  # Faster response for predictions
-                if predictions and len(predictions) > 0:
-                    predicted_replicas = predictions[0] if isinstance(predictions[0], (int, float)) else current_replicas
-                    # Use prediction directly, don't add extra replica
+            # Short cooldown for responsiveness
+            if current_time - last_scale_up_time >= 5:
+                recommended = None
+                # Allow predictions to guide target replicas
+                if isinstance(predictions, dict) and len(predictions) > 0:
+                    try:
+                        predicted_replicas = max(int(round(v)) for v in predictions.values() if isinstance(v, (int, float)))
+                        recommended = min(max_replicas_limit, max(predicted_replicas, current_replicas))
+                    except Exception:
+                        recommended = None
+                elif isinstance(predictions, (list, tuple)) and len(predictions) > 0 and isinstance(predictions[0], (int, float)):
+                    predicted_replicas = int(round(predictions[0]))
                     recommended = min(max_replicas_limit, max(predicted_replicas, current_replicas))
-                else:
-                    recommended = min(max_replicas_limit, current_replicas + 1)
+
+                if recommended is None:
+                    # Proportional reactive step based on how far above threshold we are
+                    inc = max(1, int(np.ceil((current_cpu - scale_up_threshold) / 5)))
+                    recommended = min(max_replicas_limit, current_replicas + inc)
+
                 if recommended > current_replicas:
                     heapq.heappush(decision_heap, (3.0, "scale_up", recommended, f"high_cpu_{current_cpu:.1f}%"))
         
@@ -2772,9 +2824,9 @@ def make_scaling_decision_with_minheap(predictions):
             priority = 2.5 + (rank * 0.1)  # Predictions get higher priority than reactive scaling
             
             # Predictive scale up - be proactive
-            if predicted_replicas > current_replicas and current_time - last_scale_up_time >= 20:
+            if predicted_replicas > current_replicas and current_time - last_scale_up_time >= 5:
                 # Use predictive scaling more aggressively - scale before CPU gets high
-                if current_cpu > 40 or model_name in ['holt_winters', 'ensemble']:  # Trust predictions more
+                if current_cpu > 40 or model_name in ['holt_winters']:  # Trust predictions more
                     heapq.heappush(decision_heap, (priority, "scale_up", predicted_replicas, f"predictive_{model_name}_mse_{mse:.3f}"))
             
             # Predictive scale down - be efficient  
@@ -2831,14 +2883,7 @@ def get_ranked_model_predictions():
     except Exception as e:
         logger.debug(f"Failed to get HW prediction for ranking: {e}")
     
-    try:
-        # Ensemble prediction
-        ensemble_pred = predict_with_ensemble(1)
-        if ensemble_pred and len(ensemble_pred) > 0:
-            ensemble_mse = calculate_ensemble_mse()
-            model_predictions.append((ensemble_mse, 'ensemble', ensemble_pred[0]))
-    except Exception as e:
-        logger.debug(f"Failed to get ensemble prediction for ranking: {e}")
+    # Ensemble removed from ranking
     
     # Sort by MSE (lower is better) and filter out infinite MSE
     valid_predictions = [(mse, name, pred) for mse, name, pred in model_predictions if mse != float('inf')]
@@ -2983,7 +3028,11 @@ def status():
     gru_config = config["models"]["gru"]
     # Align required data threshold with training logic used elsewhere (look_back + 2, min 15)
     min_data_required = max(int(gru_config["look_back"]) + 2, 15)
-    current_cpu = get_current_cpu_from_prometheus()  # Get real-time CPU for status
+    try:
+        current_cpu = get_current_cpu_from_prometheus()  # Get real-time CPU for status
+    except Exception:
+        # Don’t let status fail — use cached or 0
+        current_cpu = globals().get('_last_cpu_value', 0.0)
     
     # Training readiness check
     training_ready = {
@@ -3046,6 +3095,7 @@ def status():
         'current_cpu': current_cpu,
     'current_traffic': traffic_data[-1]['traffic'] if traffic_data else 0,
     'current_replicas': traffic_data[-1]['replicas'] if traffic_data else 1,
+        'last_scaling_decision': last_scaling_decision_info,
         'data_collection_status': collection_status,
         'gru_debug': {
             'training_ready': training_ready,
@@ -3099,8 +3149,8 @@ def get_prediction():
         try:
             start_time_func = time.time()
             gru_predictions = predict_with_gru(steps)
-            prediction_latency.labels(method="gru").observe(time.time() - start_time_func)
-            prediction_requests.labels(method="gru").inc()
+            prediction_latency.labels(service=SERVICE_LABEL, method="gru").observe(time.time() - start_time_func)
+            prediction_requests.labels(service=SERVICE_LABEL, method="gru").inc()
             logger.info("GRU prediction made for MSE tracking")
         except Exception as e:
             logger.error(f"GRU prediction failed: {e}")
@@ -3109,8 +3159,8 @@ def get_prediction():
     try:
         start_time_func = time.time()
         hw_predictions = predict_with_holtwinters(steps)
-        prediction_latency.labels(method="holt_winters").observe(time.time() - start_time_func)
-        prediction_requests.labels(method="holt_winters").inc()
+        prediction_latency.labels(service=SERVICE_LABEL, method="holt_winters").observe(time.time() - start_time_func)
+        prediction_requests.labels(service=SERVICE_LABEL, method="holt_winters").inc()
         logger.info("Holt-Winters prediction made for MSE tracking")
     except Exception as e:
         logger.error(f"Holt-Winters prediction failed: {e}")
@@ -3142,7 +3192,7 @@ def get_prediction():
         logger.warning("No predictions available, using ultimate fallback")
     
     decision, replicas = make_scaling_decision(predictions)
-    scaling_decisions.labels(decision=decision).inc()
+    scaling_decisions.labels(service=SERVICE_LABEL, decision=decision).inc()
     recommended_replicas.set(replicas)
     
     # Enhanced MSE status
@@ -3214,13 +3264,7 @@ def predict_combined():
             logger.error(f"Holt-Winters prediction failed in combined endpoint: {e}")
             hw_predictions = None
             
-        # Make Ensemble prediction if we have data
-        try:
-            ensemble_predictions = predict_with_ensemble()
-            logger.info(f"Ensemble prediction made in combined endpoint: {ensemble_predictions}")
-        except Exception as e:
-            logger.error(f"Ensemble prediction failed in combined endpoint: {e}")
-            ensemble_predictions = None
+        # Ensemble removed
         
         # Select method for scaling decision
         if config['mse_config']['enabled']:
@@ -3279,28 +3323,23 @@ def predict_combined():
         # This ensures Grafana always shows the latest predictions from each model
         if gru_predictions is not None:
             gru_value = int(gru_predictions[0]) if len(gru_predictions) > 0 else 0
-            predictive_scaler_recommended_replicas.labels(method='gru').set(gru_value)
+            predictive_scaler_recommended_replicas.labels(service=SERVICE_LABEL, method='gru').set(gru_value)
             logger.debug(f"Updated GRU metric in combined endpoint: {gru_value}")
         else:
-            predictive_scaler_recommended_replicas.labels(method='gru').set(0)
+            predictive_scaler_recommended_replicas.labels(service=SERVICE_LABEL, method='gru').set(0)
             
         if hw_predictions is not None:
             hw_value = int(hw_predictions[0]) if len(hw_predictions) > 0 else 0
-            predictive_scaler_recommended_replicas.labels(method='holt_winters').set(hw_value)
+            predictive_scaler_recommended_replicas.labels(service=SERVICE_LABEL, method='holt_winters').set(hw_value)
             logger.info(f"✅ Updated Holt-Winters metric in combined endpoint: {hw_value}")
         else:
-            predictive_scaler_recommended_replicas.labels(method='holt_winters').set(0)
+            predictive_scaler_recommended_replicas.labels(service=SERVICE_LABEL, method='holt_winters').set(0)
             logger.info("❌ Holt-Winters predictions is None, setting metric to 0")
             
-        if ensemble_predictions is not None:
-            ensemble_value = int(ensemble_predictions[0]) if len(ensemble_predictions) > 0 else 0
-            predictive_scaler_recommended_replicas.labels(method='ensemble').set(ensemble_value)
-            logger.debug(f"Updated Ensemble metric in combined endpoint: {ensemble_value}")
-        else:
-            predictive_scaler_recommended_replicas.labels(method='ensemble').set(0)
+        # Ensemble metrics removed in combined endpoint
         
-        prediction_requests.labels(method=method).inc()
-        scaling_decisions.labels(decision=decision).inc()
+        prediction_requests.labels(service=SERVICE_LABEL, method=method).inc()
+        scaling_decisions.labels(service=SERVICE_LABEL, decision=decision).inc()
         
         # Enhanced MSE status reporting
         gru_status = f"{gru_mse:.3f}" if gru_mse != float('inf') else "insufficient_data"
@@ -3434,7 +3473,11 @@ def get_mse_data():
 # Initialization function
 def initialize():
     """Enhanced initialization with better GRU model status logging."""
-    logger.info("Starting predictive scaler initialization...")
+    # Ensure only one initializer runs
+    with _init_lock:
+        if getattr(app, '_initialized', False):
+            return
+        logger.info("Starting predictive scaler initialization...")
     
     # Load configuration and data
     load_config()
@@ -3454,22 +3497,19 @@ def initialize():
     
     # Initialize metrics with zero values
     # Do not observe 0 into histograms at startup to avoid misleading flat lines
-    current_mse.labels(model="gru").set(-1.0)  # Start with -1 (insufficient data)
-    current_mse.labels(model="holt_winters").set(-1.0)
-    current_mse.labels(model="ensemble").set(-1.0)
-    training_time.labels(model="gru").set(0.0)
-    training_time.labels(model="holt_winters").set(0.0)
-    prediction_time.labels(model="gru").set(0.0)
-    prediction_time.labels(model="holt_winters").set(0.0)
-    predictive_scaler_recommended_replicas.labels(method='gru').set(0)
-    predictive_scaler_recommended_replicas.labels(method='holt_winters').set(0)
-    predictive_scaler_recommended_replicas.labels(method='ensemble').set(0)
-    model_selection.labels(model='gru', reason='initialization').inc(0)
-    model_selection.labels(model='holt_winters', reason='initialization').inc(0)
-    model_selection.labels(model='ensemble', reason='initialization').inc(0)
+    current_mse.labels(service=SERVICE_LABEL, model="gru").set(-1.0)  # Start with -1 (insufficient data)
+    current_mse.labels(service=SERVICE_LABEL, model="holt_winters").set(-1.0)
+    training_time.labels(service=SERVICE_LABEL, model="gru").set(0.0)
+    training_time.labels(service=SERVICE_LABEL, model="holt_winters").set(0.0)
+    prediction_time.labels(service=SERVICE_LABEL, model="gru").set(0.0)
+    prediction_time.labels(service=SERVICE_LABEL, model="holt_winters").set(0.0)
+    predictive_scaler_recommended_replicas.labels(service=SERVICE_LABEL, method='gru').set(0)
+    predictive_scaler_recommended_replicas.labels(service=SERVICE_LABEL, method='holt_winters').set(0)
+    model_selection.labels(service=SERVICE_LABEL, model='gru', reason='initialization').inc(0)
+    model_selection.labels(service=SERVICE_LABEL, model='holt_winters', reason='initialization').inc(0)
     
     # Initialize HTTP metrics counter
-    http_requests.labels(app='predictive-scaler', status_code='200', path='/').inc(0)
+    http_requests.labels(service=SERVICE_LABEL, app='predictive-scaler', status_code='200', path='/').inc(0)
     
     # Log current GRU status
     gru_config = config["models"]["gru"]
@@ -3512,14 +3552,28 @@ def initialize():
         app._gru_retrain_attempted = True
     
     logger.info("Predictive scaler initialized successfully")
+    # Mark as initialized at the very end
+    setattr(app, '_initialized', True)
+
+def _ensure_initialized_async():
+    """Start initialization in a background thread if not already initialized."""
+    if getattr(app, '_initialized', False):
+        return
+    with _init_lock:
+        if getattr(app, '_initialized', False):
+            return
+        t = threading.Thread(target=initialize, name="initializer")
+        t.daemon = True
+        t.start()
 
 @app.before_request
 def before_request():
     request.start_time = time.time()
-    
-    if not hasattr(app, '_initialized'):
-        initialize()
-        app._initialized = True
+    # Do not trigger heavy init on health checks to avoid probe timeouts
+    if request.path == '/health':
+        return
+    # Trigger async initialize once on first non-health request
+    _ensure_initialized_async()
 
 @app.after_request
 def after_request(response):
@@ -3527,9 +3581,10 @@ def after_request(response):
         duration = time.time() - request.start_time
         app_name = os.environ.get('APP_NAME', 'predictive-scaler')
         
-        http_duration.labels(app=app_name).observe(duration)
+        http_duration.labels(service=SERVICE_LABEL, app=app_name).observe(duration)
         http_requests.labels(
-            app=app_name, 
+            service=SERVICE_LABEL,
+            app=app_name,
             status_code=str(response.status_code), 
             path=request.path
         ).inc()
@@ -3902,39 +3957,7 @@ def debug_enhanced_mse():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/debug/force_ensemble_prediction', methods=['POST'])
-def debug_force_ensemble():
-    """Force creation of ensemble predictions for testing."""
-    global gru_model, is_model_trained
-    try:
-        if len(traffic_data) < 12:
-            return jsonify({
-                'success': False,
-                'error': f'Not enough data: {len(traffic_data)} < 12'
-            })
-        
-        # Force ensemble prediction
-        ensemble_pred = predict_with_ensemble(1)
-        
-        # Force MSE calculation
-        update_mse_metrics()
-        
-        return jsonify({
-            'success': True,
-            'message': 'Ensemble prediction created',
-            'results': {
-                'ensemble_prediction': ensemble_pred,
-                'gru_mse': gru_mse if gru_mse != float('inf') else None,
-                'holt_winters_mse': holt_winters_mse if holt_winters_mse != float('inf') else None,
-                'ensemble_predictions_total': len(predictions_history.get('ensemble', []))
-            }
-        })
-        
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+# Ensemble debug endpoint removed
 
 @app.route('/debug/model_comparison', methods=['GET'])
 def debug_model_comparison():
@@ -3947,8 +3970,6 @@ def debug_model_comparison():
         }
         
         models = ['gru', 'holt_winters']
-        if 'ensemble' in predictions_history and len(predictions_history['ensemble']) > 0:
-            models.append('ensemble')
         
         best_mse = float('inf')
         best_model = None
@@ -4016,13 +4037,11 @@ def debug_minheap_status():
             },
             'current_mse_values': {
                 'gru_mse': gru_mse if gru_mse != float('inf') else None,
-                'holt_winters_mse': holt_winters_mse if holt_winters_mse != float('inf') else None,
-                'ensemble_mse': calculate_ensemble_mse() if calculate_ensemble_mse() != float('inf') else None
+                'holt_winters_mse': holt_winters_mse if holt_winters_mse != float('inf') else None
             },
             'model_readiness': {
                 'gru_ready': is_model_trained and gru_model is not None,
-                'holt_winters_ready': True,
-                'ensemble_ready': 'ensemble' in predictions_history and len(predictions_history['ensemble']) > 0
+                'holt_winters_ready': True
             },
             'current_metrics': traffic_data[-1] if traffic_data else None,
             'config': {
@@ -4193,7 +4212,7 @@ def reset_data():
         # COMPLETELY clear ALL data variables and memory state
         traffic_data = []
         training_dataset = []
-        predictions_history = {'gru': [], 'holt_winters': [], 'ensemble': []}
+        predictions_history = {'gru': [], 'holt_winters': []}
         
         # Reset collection status completely
         data_collection_complete = False
@@ -4229,7 +4248,7 @@ def reset_data():
         mse_update_thread = None
         
         # Clear performance history
-        models_performance_history = {'gru': [], 'holt_winters': [], 'ensemble': []}
+        models_performance_history = {'gru': [], 'holt_winters': []}
         using_synthetic_data = False
         
         # Clear config flags
@@ -4513,12 +4532,12 @@ def debug_mse_status():
             'mse_data': {
                 'gru': get_model_mse_data('gru'),
                 'holt_winters': get_model_mse_data('holt_winters'),
-                'ensemble': get_model_mse_data('ensemble')
+                
             },
             'predictions_count': {
                 'gru': len(predictions_history.get('gru', [])),
                 'holt_winters': len(predictions_history.get('holt_winters', [])),
-                'ensemble': len(predictions_history.get('ensemble', []))
+                
             },
             'timestamp': datetime.now().isoformat()
         })
