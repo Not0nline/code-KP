@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-tester
+  labels:
+    app: load-tester
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: load-tester
+  template:
+    metadata:
+      labels:
+        app: load-tester
+    spec:
+      containers:
+      - name: load-tester
+        image: 4dri4l/load-tester:latest
+        imagePullPolicy: Always
+        ports:
+        - name: metrics
+          containerPort: 9105
+        env:
+        - name: TARGET
+          value: "both"
+        - name: DURATION
+          value: "1800"
+        - name: HPA_URL
+          value: "http://product-app-hpa-service.default.svc.cluster.local"
+        - name: COMBINED_URL
+          value: "http://product-app-combined-service.default.svc.cluster.local"
+        - name: PREDICTIVE_URL
+          value: "http://predictive-scaler.default.svc.cluster.local:5000"
+        - name: TEST_PREDICTIVE
+          value: "false"
+        - name: MAX_CONCURRENCY
+          value: "128"
+        - name: METRICS_PORT
+          value: "9105"
+        - name: NORMAL_MIN
+          value: "2"
+        - name: NORMAL_MAX
+          value: "5"
+        - name: PEAK_MIN
+          value: "100"
+        - name: PEAK_MAX
+          value: "200"
+        - name: SEASON_DURATION
+          value: "300"
+        - name: PEAK_DURATION
+          value: "60"
+        - name: PEAK_OFFSET
+          value: "60"
+        - name: VOLATILITY
+          value: "0.3"
+        - name: TIMEOUT
+          value: "60"
+        # Optional: uncomment to always fetch the latest script from your Git raw URL
+        # - name: LOAD_TEST_SOURCE_URL
+        #   value: "https://raw.githubusercontent.com/Not0nline/code-KP/main/stress-test/load_test.py"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: load-tester
+  labels:
+    app: load-tester
+spec:
+  selector:
+    app: load-tester
+  ports:
+  - name: metrics
+    port: 9105
+    targetPort: metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: load-tester-monitor
+  labels:
+    release: prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: load-tester
+  endpoints:
+  - port: metrics
+    interval: 15s
+    path: /metrics
