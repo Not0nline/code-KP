@@ -42,13 +42,13 @@ DEFAULT_PREDICTIVE_URL = "http://predictive-scaler.default.svc.cluster.local:500
 # Test target configuration - Choose which services to test
 TEST_TARGETS = {
     "hpa": False,        # Test HPA service
-    "combined": True,   # Test Combined service  
-    "predictive": True  # Test Predictive service
+    "combined": True,    # Test Combined service  
+    "predictive": True   # Test Predictive service
 }
 
 # Traffic pattern configuration - 5-minute seasons with a single peak
-NORMAL_LOAD_RANGE = (2, 5)           # Baseline requests per second during normal periods  
-PEAK_LOAD_RANGE = (80, 120)          # Peak requests per second during high-demand periods (raise as needed)
+NORMAL_LOAD_RANGE = (5, 10)           # Higher baseline requests during normal periods  
+PEAK_LOAD_RANGE = (250, 400)          # More aggressive peak requests per second during high-demand periods
 SEASON_DURATION = 300              # 5-minute seasons
 PEAK_DURATION = 60                 # Shorter, sharper peaks (60s instead of 30s)
 PEAK_START_OFFSET = 60             # Peak starts at 1 minute into each season
@@ -77,8 +77,9 @@ class LoadTester:
     def __init__(self, hpa_url, combined_url, predictive_url=None,
                  duration=3600, output_dir="./load_test_results",
                  test_hpa=True, test_combined=True, test_predictive=True,
-                 max_concurrency: int = 64,
-                 metrics_enabled: bool = False):
+                 max_concurrency: int = 256,
+                 metrics_enabled: bool = False,
+                 chaos_error_rate: float = 0.0):
         """Initialize the load tester."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = os.path.join(output_dir, f"test_run_{timestamp}")
@@ -89,6 +90,7 @@ class LoadTester:
         self.stop_event = threading.Event()
         self.max_concurrency = max(1, int(max_concurrency))
         self.metrics_enabled = bool(metrics_enabled and PROM_AVAILABLE)
+        self.chaos_error_rate = max(0.0, min(1.0, float(chaos_error_rate)))
 
         # Test target flags
         self.test_hpa = test_hpa
@@ -379,6 +381,29 @@ class LoadTester:
             return 0, 0
 
         def do_single_request():
+            # Optional: inject a client-side failure before sending any request
+            try:
+                if self.chaos_error_rate > 0.0 and np.random.rand() < self.chaos_error_rate:
+                    raise RuntimeError("chaos: injected failure")
+            except Exception as e:
+                # Record synthetic failure and return
+                endpoint_type = 'chaos'
+                method = 'GET'
+                endpoint = '/chaos'
+                results_list.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
+                    "url": url,
+                    "method": method,
+                    "endpoint": endpoint,
+                    "status_code": -1,
+                    "response_time_ms": -1,
+                    "error": str(e),
+                    "request_count": request_count,
+                    "service": name,
+                    "endpoint_type": endpoint_type
+                })
+                return 0
             endpoint_type = np.random.choice(
                 list(ENDPOINT_WEIGHTS.keys()),
                 p=list(ENDPOINT_WEIGHTS.values())
@@ -886,7 +911,8 @@ def parse_arguments():
     # Test configuration arguments
     parser.add_argument('--duration', type=int, default=1800, help='Test duration in seconds (default: 1800 = 6 complete seasons)')
     parser.add_argument('--output-dir', type=str, default='./load_test_results', help='Output directory for results')
-    parser.add_argument('--max-concurrency', type=int, default=64, help='Max parallel requests per service per second (default: 64)')
+    parser.add_argument('--max-concurrency', type=int, default=128, help='Max parallel requests per service per second (default: 128)')
+    parser.add_argument('--chaos-error-rate', type=float, default=0.0, help='Probability [0-1] to inject a client-side failure to increase error rate')
     parser.add_argument('--metrics-port', type=int, default=0, help='If > 0, expose Prometheus metrics on this port')
     
     # Seasonal pattern arguments
@@ -963,7 +989,8 @@ def main():
         test_combined=test_combined,
         test_predictive=test_predictive,
         max_concurrency=args.max_concurrency,
-        metrics_enabled=metrics_enabled
+        metrics_enabled=metrics_enabled,
+        chaos_error_rate=args.chaos_error_rate
     )
 
     try:

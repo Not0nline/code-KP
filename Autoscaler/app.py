@@ -71,6 +71,9 @@ prediction_time = Gauge('predictive_scaler_prediction_time_ms', 'Prediction time
 predictive_scaler_recommended_replicas = Gauge('predictive_scaler_recommended_replicas', 
                                              'Recommended number of replicas', 
                                              ['service','method'])
+predicted_load_gauge = Gauge('predictive_scaler_predicted_load',
+                             'Predicted request load (req/s)',
+                             labelnames=['service','model'])
 current_actual_replicas = Gauge('predictive_scaler_actual_replicas', 
                               'Current actual number of replicas',
                               labelnames=['service'])
@@ -126,9 +129,9 @@ config = {
     "target_namespace": os.getenv('TARGET_NAMESPACE', 'default'),
     "cost_optimization": {
         "enabled": True,
-        "target_cpu_utilization": 70,  # Target higher CPU for efficiency (0-100 scale)
-        "scale_up_threshold": 75,  # Scale up only at very high CPU (0-100 scale)
-        "scale_down_threshold": 30,  # Scale down at higher threshold (0-100 scale)  
+        "target_cpu_utilization": 100,  # Target higher CPU for efficiency (0-100 scale)
+        "scale_up_threshold": 95,  # Scale up only at very high CPU (0-100 scale)
+        "scale_down_threshold": 50,  # Scale down at higher threshold (0-100 scale)  
         "min_replicas": 1,
         "max_replicas": 10,
         "aggressive_scaling": False,  # More conservative scaling
@@ -438,7 +441,7 @@ def collect_single_metric_point():
         current_memory = float(memory_result[0]['value'][1]) if memory_result else 0
         
         # Request rate (traffic)
-        request_query = f'sum(rate(nginx_ingress_controller_requests{{service=~"{config["target_deployment"]}"}}[5m])) * 60'
+        request_query = f'sum(rate(app_http_requests_total{{app="{config["target_deployment"]}"}}[1m]))'
         request_result = prometheus_client.custom_query(request_query)
         current_traffic = float(request_result[0]['value'][1]) if request_result else 0
         
@@ -1032,15 +1035,23 @@ def add_prediction_to_history(model_name, predicted_replicas, timestamp):
         current_replicas = latest_data['replicas']
     
     # Estimate predicted load for load-based MSE preference
+    # Prefer throughput-per-replica * predicted_replicas to reflect capacity-based forecast
+    predicted_load = None
     try:
-        # Use recent traffic average as a proxy; specific model predictors can refine this later
         if traffic_data:
-            recent_tr = [d.get('traffic', 0.0) for d in traffic_data[-10:]]
-            predicted_load = float(sum(recent_tr) / max(1, len(recent_tr)))
-        else:
-            predicted_load = None
+            # Use most recent non-zero replicas to avoid division by zero
+            recent = traffic_data[-1]
+            reps = max(1, int(recent.get('replicas', 1)))
+            curr_tr = float(recent.get('traffic', 0.0))
+            tpr = curr_tr / float(reps) if reps > 0 else 0.0  # throughput per replica (req/s)
+            predicted_load = float(predicted_replicas) * tpr
+        if predicted_load is None or predicted_load == 0.0:
+            # Fallback to recent average if we have no meaningful throughput
+            recent_tr = [float(d.get('traffic', 0.0)) for d in traffic_data[-10:]] if traffic_data else []
+            predicted_load = float(sum(recent_tr) / max(1, len(recent_tr))) if recent_tr else 0.0
     except Exception:
-        predicted_load = None
+        # Final fallback
+        predicted_load = 0.0
 
     prediction_entry = {
         'timestamp': timestamp,
@@ -1061,6 +1072,12 @@ def add_prediction_to_history(model_name, predicted_replicas, timestamp):
     # forecast accuracy on future observations only.
     
     predictions_history[model_name].append(prediction_entry)
+
+    # Export predicted load for visualization
+    try:
+        predicted_load_gauge.labels(service=SERVICE_LABEL, model=model_name).set(float(predicted_load or 0.0))
+    except Exception:
+        pass
     
     # Keep only recent predictions
     mse_window = config['mse_config']['mse_window_size']

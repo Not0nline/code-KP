@@ -20,9 +20,15 @@ This README provides the steps to deploy the Kubernetes components for the autos
 │   ├── combination/
 │   ├── controller/
 │   └── hpa/
-└── stress-test/        # Load testing scripts & K8s manifests
-    ├── load_test.py
-    └── load-test-pod.yaml
+└── stress-test/        # Load testing scripts, image, and K8s manifests
+  ├── load_test.py                 # Load tester script (supports client metrics)
+  ├── Dockerfile                   # Container image for auto-deployed load tester
+  ├── requirements.txt             # Python deps for image
+  ├── entrypoint.sh                # Container startup (fetch latest script, run tester)
+  ├── load-tester-deployment.yaml  # Deployment + Service + ServiceMonitor (auto)
+  ├── load-test-pod.yaml           # Legacy one-off pod (manual execution)
+  ├── load-test-service.yaml       # Legacy Service (metrics)
+  └── load-test-servicemonitor.yaml# Legacy ServiceMonitor (metrics)
 ```
 
 ## Prerequisites
@@ -131,9 +137,9 @@ helm install prometheus prometheus-community/kube-prometheus-stack \
   --set grafana.persistence.existingClaim=grafana-pvc \
   --set grafana.nodeSelector."kubernetes\.io/hostname"="YOUR-NODE-HOSTNAME" \
   --set kubeStateMetrics.enabled=true \
-  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
-  --set prometheus.prometheusSpec.serviceMonitorSelector.matchLabels.release=prometheus
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
 ```
+> Important: All ServiceMonitor YAMLs in this repo include a `metadata.labels.release` label. Ensure its value matches the Helm release name you use above (default here is `prometheus`). If you install with a different release name (e.g., `monitoring`), update the ServiceMonitor labels or set a matching selector in your Helm values.
 
 **Verify installation:**
 ```bash
@@ -185,7 +191,7 @@ kubectl apply -f Autoscaler/predictive-scaler-rbac.yaml
 kubectl apply -f Autoscaler/predictive-scaler-service.yaml
 kubectl apply -f Autoscaler/predictive-scaler-deployment.yaml
 
-# Deploy ServiceMonitor (ensure it has 'release: prometheus' label)
+# Deploy ServiceMonitor (ensure its metadata.labels.release matches your Helm release)
 kubectl apply -f Autoscaler/predictive-scaler-servicemonitor.yaml -n monitoring
 ```
 
@@ -226,38 +232,64 @@ kubectl apply -f Product-App/Combination/product-app-combined-servicemonitor.yam
 kubectl apply -f Product-App/Combination/scaling-controller-combined.yaml
 ```
 
-### 7. Deploy and Run Load Tests
+### 7. Load Testing Options
 
-**Deploy load test pod:**
+You can run load tests in two ways: Auto-deployed (recommended) or Legacy one-off pod.
+
+#### Option A: Auto-deployed Load Tester (recommended)
+
+1) Build and push the load tester image (replace `your-dockerhub-username`):
+
+```bash
+docker build -f stress-test/Dockerfile -t your-dockerhub-username/load-tester:latest .
+docker push your-dockerhub-username/load-tester:latest
+```
+
+2) Update image in `stress-test/load-tester-deployment.yaml` to your repo and apply:
+
+```bash
+kubectl apply -f stress-test/load-tester-deployment.yaml
+```
+
+3) Verify rollout and logs:
+
+```bash
+kubectl get deploy load-tester
+kubectl get pods -l app=load-tester
+kubectl logs deploy/load-tester --tail 50 -f
+```
+
+4) Optional: expose client metrics locally
+
+```bash
+kubectl port-forward svc/load-tester 9105:9105
+# Browse http://localhost:9105/metrics
+```
+
+5) Optional: always fetch the latest script (no rebuild needed)
+
+```bash
+kubectl set env deploy/load-tester LOAD_TEST_SOURCE_URL=https://raw.githubusercontent.com/<owner>/<repo>/main/stress-test/load_test.py
+kubectl rollout restart deploy/load-tester
+```
+
+> The Deployment uses `imagePullPolicy: Always` so new images are pulled at startup. If you also set `LOAD_TEST_SOURCE_URL`, the container fetches the latest `load_test.py` at boot.
+
+#### Option B: Legacy one-off Pod (manual execution)
+
 ```bash
 kubectl apply -f stress-test/load-test-pod.yaml
-```
-
-**Wait for pod to be ready:**
-```bash
 kubectl wait --for=condition=Ready pod/load-test --timeout=60s
-```
-
-**Copy test script and install dependencies:**
-```bash
 kubectl cp stress-test/load_test.py load-test:/tmp/load_test.py
-kubectl exec -it load-test -- bash -c "pip install requests numpy pandas"
+kubectl exec -it load-test -- bash -c "pip install requests numpy pandas prometheus-client && cd /tmp && python load_test.py --duration 600 --target combined --metrics-port 9105"
+kubectl logs load-test --tail=50 -f
 ```
 
-**Run load test:**
+> If you previously used the legacy pod and are switching to the Deployment, remove the old resources to avoid duplicate load:
 ```bash
-# Basic load test targeting combined service (300 seconds = 5 minutes)
-kubectl exec -it load-test -- bash -c "cd /tmp && python load_test.py --duration 300 --target combined"
-
-# Extended load test (600 seconds = 10 minutes) 
-kubectl exec -it load-test -- bash -c "cd /tmp && python load_test.py --duration 600 --target combined"
-
-# Test different targets:
-# kubectl exec -it load-test -- bash -c "cd /tmp && python load_test.py --duration 300 --target hpa"      # For HPA setup
-# kubectl exec -it load-test -- bash -c "cd /tmp && python load_test.py --duration 300 --target combined" # For Combined setup
-
-# Monitor load test progress (in another terminal):
-kubectl logs load-test --tail=20 -f
+kubectl delete pod load-test --ignore-not-found
+kubectl delete -f stress-test/load-test-service.yaml --ignore-not-found
+kubectl delete -f stress-test/load-test-servicemonitor.yaml --ignore-not-found
 ```
 
 ## Verification and Monitoring
@@ -306,7 +338,7 @@ kubectl get servicemonitors -n monitoring -o yaml
 kubectl get pod load-test
 kubectl describe pod load-test
 
-# If load test pod is just sleeping, run manually:
+# If using the legacy pod and it is just sleeping, run manually:
 kubectl exec -it load-test -- bash -c "
   pip install requests numpy pandas && 
   cd /tmp && 
@@ -319,6 +351,16 @@ kubectl top pods | grep product-app-combined
 # Check autoscaler data collection:
 curl http://localhost:5000/status | jq '{current_cpu, data_points, data_points_collected}'
 ```
+
+## About `entrypoint.sh`
+
+`stress-test/entrypoint.sh` is the container startup script used by the auto-deployed load tester image. It:
+
+- Optionally downloads the latest `load_test.py` from `LOAD_TEST_SOURCE_URL` (if set)
+- Composes the Python command using environment variables (targets, peak ranges, duration, concurrency, metrics port)
+- Starts the load test and exposes client metrics
+
+Keep `entrypoint.sh` if you are using the load tester container/Deployment. If you only run the script manually with the legacy pod or on your local machine, you can ignore it (but the Dockerfile expects it, so don’t delete it if you plan to build the image).
 
 ## Important Notes
 

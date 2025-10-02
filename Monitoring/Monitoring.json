@@ -140,7 +140,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\"}[1m]))",
+          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\"}[2m])) or on() vector(0)",
           "legendFormat": "Combined Request Rate",
           "range": true,
           "refId": "B"
@@ -1070,7 +1070,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code=~\"2..\"}[5m])) / sum(rate(app_http_requests_total{app=\"product-app-combined\"}[5m]))",
+          "expr": "(sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code=~\"2..\"}[5m])) / sum(rate(app_http_requests_total{app=\"product-app-combined\"}[5m]))) or on() vector(0)",
           "legendFormat": "Success Rate",
           "range": true,
           "refId": "A"
@@ -1081,7 +1081,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code!~\"2..\"}[5m])) / sum(rate(app_http_requests_total{app=\"product-app-combined\"}[5m]))",
+          "expr": "(sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code!~\"2..\"}[5m])) / sum(rate(app_http_requests_total{app=\"product-app-combined\"}[5m]))) or on() vector(0)",
           "legendFormat": "Error Rate",
           "range": true,
           "refId": "B"
@@ -1348,7 +1348,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code=~\"2..\"}[1m]))",
+          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code=~\"2..\"}[2m])) or on() vector(0)",
           "legendFormat": "Successful Requests (200)",
           "range": true,
           "refId": "A"
@@ -1359,7 +1359,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code!~\"2..\"}[1m]))",
+          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code!~\"2..\"}[2m])) or on() vector(0)",
           "legendFormat": "Error Requests (non-200)",
           "range": true,
           "refId": "B"
@@ -2251,6 +2251,144 @@
         }
       ],
       "title": "Error Rate Comparison",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 89
+      },
+      "id": 34,
+      "panels": [],
+      "title": "Client Load Tester",
+      "type": "row"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 97 },
+      "id": 37,
+      "panels": [],
+      "title": "Actual vs Predicted Load",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {},
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 98 },
+      "id": 38,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "hideZeros": false, "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\"}[2m])) or on() vector(0)",
+          "legendFormat": "Actual Load (Combined)",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "predictive_scaler_predicted_load{model=\"holt_winters\"}",
+          "legendFormat": "Predicted Load - Holt-Winters",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "predictive_scaler_predicted_load{model=\"gru\"}",
+          "legendFormat": "Predicted Load - GRU",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "Actual vs Predicted Load (req/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {},
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 90 },
+      "id": 35,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "hideZeros": false, "mode": "single", "sort": "none" }
+      },
+      "pluginVersion": "12.1.0",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "load_tester_rps",
+          "legendFormat": "{{service}} RPS",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Client Achieved RPS",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {},
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 90 },
+      "id": 36,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "hideZeros": false, "mode": "single", "sort": "none" }
+      },
+      "pluginVersion": "12.1.0",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "load_tester_error_rate * 100",
+          "legendFormat": "{{service}} Error %",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Client Error Rate",
       "type": "timeseries"
     }
   ],

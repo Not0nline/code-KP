@@ -31,6 +31,10 @@ spec:
           value: "60"
         - name: SCALING_THRESHOLD
           value: "0.5"
+        - name: CPU_SCALE_UP_THRESHOLD
+          value: "95"
+        - name: CPU_SCALE_DOWN_THRESHOLD
+          value: "50"
         - name: DEBUG_MODE
           value: "true"
         - name: PROMETHEUS_SERVER
