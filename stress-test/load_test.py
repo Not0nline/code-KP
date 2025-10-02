@@ -13,6 +13,15 @@ import csv
 import shutil
 import json
 from requests.exceptions import ConnectTimeout, ReadTimeout
+from concurrent.futures import ThreadPoolExecutor, as_completed
+try:
+    from prometheus_client import start_http_server as prom_start_http_server, Counter as PromCounter, Gauge as PromGauge
+    PROM_AVAILABLE = True
+except Exception:
+    PROM_AVAILABLE = False
+    prom_start_http_server = None
+    PromCounter = None
+    PromGauge = None
 
 # Configure logging
 logging.basicConfig(
@@ -37,13 +46,13 @@ TEST_TARGETS = {
     "predictive": True  # Test Predictive service
 }
 
-# Traffic pattern configuration - 5-minute seasons with double peaks
+# Traffic pattern configuration - 5-minute seasons with a single peak
 NORMAL_LOAD_RANGE = (2, 5)           # Baseline requests per second during normal periods  
-PEAK_LOAD_RANGE = (35, 50)           # Peak requests per second during high-demand periods (lowered)
+PEAK_LOAD_RANGE = (80, 120)          # Peak requests per second during high-demand periods (raise as needed)
 SEASON_DURATION = 300              # 5-minute seasons
 PEAK_DURATION = 60                 # Shorter, sharper peaks (60s instead of 30s)
 PEAK_START_OFFSET = 60             # Peak starts at 1 minute into each season
-VOLATILITY_FACTOR = 0.3            # HIGH volatility for unpredictable patterns
+VOLATILITY_FACTOR = 0.3            # Volatility for unpredictability (0 for perfectly repeatable)
 
 # Endpoint weights (probability distribution)
 ENDPOINT_WEIGHTS = {
@@ -67,7 +76,9 @@ class LoadTester:
     """
     def __init__(self, hpa_url, combined_url, predictive_url=None,
                  duration=3600, output_dir="./load_test_results",
-                 test_hpa=True, test_combined=True, test_predictive=True):
+                 test_hpa=True, test_combined=True, test_predictive=True,
+                 max_concurrency: int = 64,
+                 metrics_enabled: bool = False):
         """Initialize the load tester."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = os.path.join(output_dir, f"test_run_{timestamp}")
@@ -76,6 +87,8 @@ class LoadTester:
         self.predictive_url = predictive_url
         self.duration = duration
         self.stop_event = threading.Event()
+        self.max_concurrency = max(1, int(max_concurrency))
+        self.metrics_enabled = bool(metrics_enabled and PROM_AVAILABLE)
 
         # Test target flags
         self.test_hpa = test_hpa
@@ -102,6 +115,23 @@ class LoadTester:
 
         self.current_request_rate = 0
 
+        # Metrics setup
+        self.prev_indices = {}
+        if self.metrics_enabled:
+            self.metrics_requests_total = PromCounter(
+                'load_tester_requests_total', 'Requests made by load tester', ['service', 'outcome']
+            )
+            self.metrics_rps = PromGauge(
+                'load_tester_rps', 'Per-second achieved RPS by service', ['service']
+            )
+            self.metrics_error_rate = PromGauge(
+                'load_tester_error_rate', 'Per-second error rate by service', ['service']
+            )
+            if self.test_hpa:
+                self.prev_indices['HPA'] = 0
+            if self.test_combined:
+                self.prev_indices['Combined'] = 0
+
         # Log which services will be tested
         active_services = []
         if self.test_hpa:
@@ -114,11 +144,37 @@ class LoadTester:
         logger.info(f"Testing services: {', '.join(active_services)}")
         logger.info(f"Results will be saved to: {self.output_dir}")
 
+    def _update_client_metrics_for_service(self, service_name: str, results_list: list):
+        if not self.metrics_enabled:
+            return
+        start_idx = self.prev_indices.get(service_name, 0)
+        new_entries = results_list[start_idx:]
+        total = len(new_entries)
+        successes = sum(1 for r in new_entries if 200 <= r.get('status_code', 0) < 400)
+        errors = total - successes
+        # Set gauges for this second
+        self.metrics_rps.labels(service=service_name).set(total)
+        self.metrics_error_rate.labels(service=service_name).set((errors / total) if total > 0 else 0.0)
+        # Increment counters cumulatively
+        if successes:
+            self.metrics_requests_total.labels(service=service_name, outcome='success').inc(successes)
+        if errors:
+            self.metrics_requests_total.labels(service=service_name, outcome='error').inc(errors)
+        # Advance index
+        self.prev_indices[service_name] = start_idx + total
+
+    def update_client_metrics(self):
+        if not self.metrics_enabled:
+            return
+        if self.test_hpa:
+            self._update_client_metrics_for_service('HPA', self.hpa_results)
+        if self.test_combined:
+            self._update_client_metrics_for_service('Combined', self.combined_results)
+
     def generate_traffic_pattern(self):
         """
-        Generate a PERFECTLY SEASONAL traffic pattern optimized for Holt-Winters.
-        Every season is IDENTICAL - same timing, same intensity, same duration.
-        This gives Holt-Winters a massive advantage over reactive HPA.
+        Generate a seasonal traffic pattern with a clear peak window per season.
+        Peak seconds draw from PEAK_LOAD_RANGE; normal seconds draw from NORMAL_LOAD_RANGE.
         """
         time_points = list(range(self.duration))
         request_rates = []
@@ -131,7 +187,7 @@ class LoadTester:
         num_complete_seasons = self.duration // SEASON_DURATION
         logger.info(f"Generating {num_complete_seasons} complete seasons of {SEASON_DURATION} seconds each")
         logger.info(f"Single-peak pattern: Peak at {PEAK_START_OFFSET}-{PEAK_START_OFFSET + PEAK_DURATION}s in each season")
-        logger.info(f"Volatility factor: {VOLATILITY_FACTOR} for less predictable patterns")
+        logger.info(f"Volatility factor: {VOLATILITY_FACTOR}")
 
         for second in time_points:
             # Calculate position within the current season
@@ -145,27 +201,26 @@ class LoadTester:
             is_peak = (peak_start <= season_position < peak_end)
             
             if is_peak:
-                # Calculate peak intensity
+                # Peak intensity sampled within the configured peak range
                 peak_progress = (season_position - peak_start) / PEAK_DURATION
                 load_type = "SEASONAL_PEAK"
-                
-                # Base peak value with volatility
-                base_value = (peak_min + peak_max) / 2
-                
-                # Quicker, less smooth transitions - steeper ramp up/down
-                if peak_progress < 0.1:  # Very quick ramp up (10% of peak)
+
+                # Draw from peak range each peak second for stronger peaks
+                base_value = np.random.uniform(peak_min, peak_max)
+
+                # Quick ramp up/down at the first/last 10% of peak window
+                if peak_progress < 0.1:
                     ramp_factor = peak_progress / 0.1
                     base_value = normal_max + (base_value - normal_max) * ramp_factor
-                elif peak_progress > 0.9:  # Very quick ramp down (last 10% of peak)
+                elif peak_progress > 0.9:
                     ramp_factor = (1.0 - peak_progress) / 0.1
                     base_value = normal_max + (base_value - normal_max) * ramp_factor
-                    
+
             else:
-                # Normal load between peaks with volatility
-                base_value = (normal_min + normal_max) / 2
+                # Normal load sampled within normal range with a bit of seasonal sine variation
+                base_value = np.random.uniform(normal_min, normal_max)
                 load_type = "SEASONAL_NORMAL"
-                
-                # Add volatility - more variation in normal periods
+
                 normal_progress = season_position / SEASON_DURATION
                 sine_variation = VOLATILITY_FACTOR * (normal_max - normal_min) * np.sin(4 * np.pi * normal_progress)
                 base_value += sine_variation
@@ -199,15 +254,15 @@ class LoadTester:
                 "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "SEASONAL_PEAK"]), 2) if load_types.count("SEASONAL_PEAK") else 0
             }
         }
-        
+
         num_complete_seasons = self.duration // SEASON_DURATION
-        peak_seconds_per_season = PEAK_DURATION * 2  # Two peaks per season now
-        normal_seconds_per_season = SEASON_DURATION - (PEAK_DURATION * 2)
-        
+        peak_seconds_per_season = PEAK_DURATION
+        normal_seconds_per_season = SEASON_DURATION - PEAK_DURATION
+
         with open(os.path.join(self.output_dir, "patterns", "pattern_summary.txt"), 'w') as f:
             f.write("SINGLE-PEAK SEASONAL TRAFFIC PATTERN\n")
             f.write("===================================\n\n")
-            f.write("🎯 SIMPLIFIED PATTERN FOR CLEAR SCALING BEHAVIOR 🎯\n\n")
+            f.write("Simplified pattern for clear scaling behavior\n\n")
             f.write(f"Test Duration: {self.duration} seconds\n")
             f.write(f"Season Duration: {SEASON_DURATION} seconds (5 minutes)\n")
             f.write(f"Complete Seasons: {num_complete_seasons}\n")
@@ -215,15 +270,12 @@ class LoadTester:
             f.write(f"Peak Duration: {PEAK_DURATION} seconds\n")
             f.write(f"Normal Load: {NORMAL_LOAD_RANGE} req/sec\n")
             f.write(f"Peak Load: {PEAK_LOAD_RANGE} req/sec\n")
-            f.write(f"Volatility: {VOLATILITY_FACTOR} (Enhanced randomness)\n\n")
-            f.write("SIMPLIFIED PATTERN FEATURES:\n")
+            f.write(f"Volatility: {VOLATILITY_FACTOR}\n\n")
+            f.write("Pattern features:\n")
             f.write("- One peak per 5-minute season\n")
-            f.write("- Quicker, less smooth transitions\n")
-            f.write("- Added randomness to break perfect predictability\n")
-            f.write("- Identical intensity every season\n")
-            f.write("- Identical duration every season\n")
-            f.write("- Zero random variation\n")
-            f.write("- Smooth ramps for realistic load\n\n")
+            f.write("- Quick ramps at peak boundaries\n")
+            f.write("- Peak seconds draw from PEAK_LOAD_RANGE\n")
+            f.write("- Normal seconds draw from NORMAL_LOAD_RANGE\n\n")
             f.write("PATTERN BREAKDOWN\n")
             f.write("----------------\n")
             for pt, stats in pattern_summary.items():
@@ -232,7 +284,7 @@ class LoadTester:
             f.write(f"- Normal: {normal_seconds_per_season} seconds per season\n")
             f.write(f"- Peak: {peak_seconds_per_season} seconds per season\n")
         self.save_pattern_chart(time_points, request_rates, load_types)
-        logger.info("Generated PERFECT SEASONAL traffic pattern optimized for Holt-Winters")
+        logger.info("Generated seasonal traffic pattern")
         logger.info(f"✅ {num_complete_seasons} single-peak seasons, each {SEASON_DURATION}s with peak at {PEAK_START_OFFSET}s")
         return rate_map
 
@@ -318,38 +370,38 @@ class LoadTester:
 
     def make_requests(self, url, second, request_count, results_list, products_list, lock, name):
         """
-        Make a fixed number of requests to a target URL.
-        Requests are evenly distributed within the second using a small delay.
+        Make 'request_count' requests to a target URL, using concurrency so we can
+        actually hit high RPS during peaks. Results are appended to results_list.
         """
-        successful = 0
-        failed = 0
         self.current_request_rate = request_count
-        delay = 0.8 / (request_count + 1)
-        for i in range(request_count):
-            try:
-                if i > 0:
-                    time.sleep(delay)
-                endpoint_type = np.random.choice(
-                    list(ENDPOINT_WEIGHTS.keys()),
-                    p=list(ENDPOINT_WEIGHTS.values())
-                )
-                method = "GET"
-                data = None
+
+        if request_count <= 0:
+            return 0, 0
+
+        def do_single_request():
+            endpoint_type = np.random.choice(
+                list(ENDPOINT_WEIGHTS.keys()),
+                p=list(ENDPOINT_WEIGHTS.values())
+            )
+            method = "GET"
+            data = None
+            endpoint = "/health"
+            if endpoint_type == "product_list":
+                endpoint = "/product/list"
+            elif endpoint_type == "product_create":
+                method = "POST"
+                endpoint = "/product/create"
+                data = self.generate_product_data()
+            elif endpoint_type == "load":
+                duration_param = 1
+                intensity = np.random.randint(10, 30)
+                endpoint = f"/load?duration={duration_param}&intensity={intensity}"
+            elif endpoint_type == "health":
                 endpoint = "/health"
-                if endpoint_type == "product_list":
-                    endpoint = "/product/list"
-                elif endpoint_type == "product_create":
-                    method = "POST"
-                    endpoint = "/product/create"
-                    data = self.generate_product_data()
-                elif endpoint_type == "load":
-                    duration_param = 1
-                    intensity = np.random.randint(10, 30)
-                    endpoint = f"/load?duration={duration_param}&intensity={intensity}"
-                elif endpoint_type == "health":
-                    endpoint = "/health"
-                start_time = time.time()
-                full_url = f"{url}{endpoint}"
+
+            start_time = time.time()
+            full_url = f"{url}{endpoint}"
+            try:
                 if method == "GET":
                     response = requests.get(full_url, timeout=REQUEST_TIMEOUT)
                 else:
@@ -358,21 +410,16 @@ class LoadTester:
                 end_time = time.time()
                 status_code = response.status_code
                 response_time_ms = (end_time - start_time) * 1000
-                if 200 <= status_code < 400:
-                    successful += 1
-                    if endpoint_type == "product_create" and status_code == 201:
-                        try:
-                            resp_data = response.json()
-                            if 'product' in resp_data and 'id' in resp_data['product']:
-                                product_id = resp_data['product']['id']
-                                with lock:
-                                    products_list.append(product_id)
-                                logger.debug(f"Created product {product_id} for {name}")
-                        except Exception as e:
-                            logger.warning(f"Could not extract product ID: {e}")
-                else:
-                    failed += 1
-                    logger.warning(f"{name} service request to {full_url} failed with status {status_code}")
+                if 200 <= status_code < 400 and endpoint_type == "product_create" and status_code == 201:
+                    try:
+                        resp_data = response.json()
+                        if 'product' in resp_data and 'id' in resp_data['product']:
+                            product_id = resp_data['product']['id']
+                            with lock:
+                                products_list.append(product_id)
+                            logger.debug(f"Created product {product_id} for {name}")
+                    except Exception as e:
+                        logger.debug(f"Could not extract product ID: {e}")
                 results_list.append({
                     "timestamp": datetime.now().isoformat(),
                     "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
@@ -385,43 +432,62 @@ class LoadTester:
                     "service": name,
                     "endpoint_type": endpoint_type
                 })
+                return 1 if 200 <= status_code < 400 else 0
             except (ConnectTimeout, ReadTimeout) as e:
-                failed += 1
-                logger.error(f"{name} service timed out to {url}{endpoint}: {e}")
+                logger.error(f"{name} service timed out to {full_url}: {e}")
                 results_list.append({
                     "timestamp": datetime.now().isoformat(),
                     "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
                     "url": url,
-                    "method": method if 'method' in locals() else "unknown",
-                    "endpoint": endpoint if 'endpoint' in locals() else "unknown",
+                    "method": method,
+                    "endpoint": endpoint,
                     "status_code": -1,
                     "response_time_ms": -1,
                     "error": f"{name} service timeout: {str(e)}",
                     "request_count": request_count,
                     "service": name,
-                    "endpoint_type": endpoint_type if 'endpoint_type' in locals() else "unknown"
+                    "endpoint_type": endpoint_type
                 })
+                return 0
             except Exception as e:
-                failed += 1
-                logger.error(f"[{name} service] failed to {url}{endpoint}: {e}")
+                logger.error(f"[{name} service] failed to {full_url}: {e}")
                 results_list.append({
                     "timestamp": datetime.now().isoformat(),
                     "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
                     "url": url,
-                    "method": method if 'method' in locals() else "unknown",
-                    "endpoint": endpoint if 'endpoint' in locals() else "unknown",
+                    "method": method,
+                    "endpoint": endpoint,
                     "status_code": -1,
                     "response_time_ms": -1,
                     "error": f"{name} service failed: {str(e)}",
                     "request_count": request_count,
                     "service": name,
-                    "endpoint_type": endpoint_type if 'endpoint_type' in locals() else "unknown"
+                    "endpoint_type": endpoint_type
                 })
+                return 0
+
+        successes = 0
+        failures = 0
+        max_workers = min(self.max_concurrency, request_count)
+        # Fire requests concurrently; executor will queue extras if request_count > max_workers
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(do_single_request) for _ in range(request_count)]
+            for f in as_completed(futures):
+                try:
+                    ok = f.result()
+                    if ok:
+                        successes += 1
+                    else:
+                        failures += 1
+                except Exception as e:
+                    failures += 1
+                    logger.debug(f"Request future error: {e}")
+
         if request_count > 0:
-            total = successful + failed
-            success_rate = (successful / total) * 100 if total > 0 else 0
-            logger.debug(f"Second {second}: Made {total} requests to {name} (S:{successful}/F:{failed}, {success_rate:.1f}% success)")
-        return successful, failed
+            total = successes + failures
+            success_rate = (successes / total) * 100 if total > 0 else 0
+            logger.debug(f"Second {second}: Made {total} requests to {name} (S:{successes}/F:{failures}, {success_rate:.1f}% success)")
+        return successes, failures
 
     def run_test(self):
         """
@@ -509,6 +575,9 @@ class LoadTester:
             # Wait for threads to complete to keep per-second counts equal across services
             for thread in threads:
                 thread.join()
+
+            # Update client Prometheus metrics per second
+            self.update_client_metrics()
 
             # Pace the loop to approximately one-second ticks
             elapsed_in_second = (datetime.now() - (self.start_time + timedelta(seconds=second))).total_seconds()
@@ -817,6 +886,8 @@ def parse_arguments():
     # Test configuration arguments
     parser.add_argument('--duration', type=int, default=1800, help='Test duration in seconds (default: 1800 = 6 complete seasons)')
     parser.add_argument('--output-dir', type=str, default='./load_test_results', help='Output directory for results')
+    parser.add_argument('--max-concurrency', type=int, default=64, help='Max parallel requests per service per second (default: 64)')
+    parser.add_argument('--metrics-port', type=int, default=0, help='If > 0, expose Prometheus metrics on this port')
     
     # Seasonal pattern arguments
     parser.add_argument('--normal-min', type=int, default=NORMAL_LOAD_RANGE[0], help=f'Minimum normal requests (default: {NORMAL_LOAD_RANGE[0]})')
@@ -861,16 +932,26 @@ def main():
         logger.info(f"Predictive URL: {args.predictive_url}")
     logger.info(f"Duration: {args.duration} seconds")
     logger.info(f"Output directory: {args.output_dir}")
-    logger.info(f"🎯 PERFECT SEASONAL PATTERN FOR HOLT-WINTERS 🎯")
+    logger.info(f"Seasonal traffic pattern (single peak per season)")
     logger.info(f"Normal load range: {NORMAL_LOAD_RANGE} req/sec")
     logger.info(f"Peak load range: {PEAK_LOAD_RANGE} req/sec")
     logger.info(f"Season duration: {SEASON_DURATION} seconds (5 minutes)")
     logger.info(f"Peak duration: {PEAK_DURATION} seconds")
     logger.info(f"Peak offset: {PEAK_START_OFFSET} seconds into each season")
-    logger.info(f"Volatility factor: {VOLATILITY_FACTOR} (ZERO randomness)")
+    logger.info(f"Volatility factor: {VOLATILITY_FACTOR}")
     logger.info(f"Request timeout: {REQUEST_TIMEOUT} seconds")
+    logger.info(f"Max concurrency: {args.max_concurrency}")
     logger.info(f"Endpoint weights: {ENDPOINT_WEIGHTS}")
     logger.info("===========================")
+
+    # Start optional Prometheus metrics server
+    metrics_enabled = args.metrics_port > 0 and PROM_AVAILABLE
+    if args.metrics_port > 0:
+        if PROM_AVAILABLE:
+            prom_start_http_server(args.metrics_port)
+            logger.info(f"Client metrics exporter started on port {args.metrics_port}")
+        else:
+            logger.warning("Prometheus client not available; install 'prometheus_client' to enable metrics")
 
     tester = LoadTester(
         hpa_url=args.hpa_url,
@@ -880,7 +961,9 @@ def main():
         output_dir=args.output_dir,
         test_hpa=test_hpa,
         test_combined=test_combined,
-        test_predictive=test_predictive
+        test_predictive=test_predictive,
+        max_concurrency=args.max_concurrency,
+        metrics_enabled=metrics_enabled
     )
 
     try:
