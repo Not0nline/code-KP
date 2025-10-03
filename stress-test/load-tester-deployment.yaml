@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: load-tester
-  image: "4dri4l/stress-test:latest"
+        image: "4dri4l/stress-test:latest"
         imagePullPolicy: Always
         ports:
         - name: metrics
