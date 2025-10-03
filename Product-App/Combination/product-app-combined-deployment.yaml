@@ -18,7 +18,7 @@ spec:
         imagePullPolicy: Always
         command: ["/bin/sh", "-c"]
         args:
-          - "gunicorn --workers 2 --threads 2 --bind 0.0.0.0:5000 --timeout 10 app:app"
+          - "gunicorn --workers 4 --threads 4 --bind 0.0.0.0:5000 --timeout 30 app:app"
         ports:
         - name: http-metrics
           containerPort: 5000

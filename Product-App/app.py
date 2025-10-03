@@ -41,7 +41,8 @@ products = []
 
 # Track concurrent requests
 concurrent_requests = 0
-max_concurrent_requests = 10  # Reject if more than this
+# Allow much higher concurrency to prevent client-side 503s during stress tests
+max_concurrent_requests = 200  # Reject if more than this
 request_lock = threading.Lock()
 
 # Ensure counters exist at startup so Prometheus scrapes have stable series even when idle
@@ -63,7 +64,8 @@ def before_request_timing():
     global concurrent_requests
     
     # Always allow fast paths for health and metrics; don't throttle or count concurrency
-    if request.path in ('/metrics', '/health'):
+    # Also allow /load to bypass concurrency cap so spikes can fully saturate CPU during tests
+    if request.path in ('/metrics', '/health', '/load'):
         request.start_time = time.time()
         return
 
@@ -211,9 +213,15 @@ def generate_load():
     endpoint_path = '/load'
     
     try:
-        duration = min(int(request.args.get('duration', 1)), 5)  # Max 5 seconds
-        intensity = min(int(request.args.get('intensity', 5)), 10)  # Max 10 intensity
-        
+        # Accept fractional seconds and allow very short bursts
+        try:
+            duration = float(request.args.get('duration', 1))
+        except Exception:
+            duration = 1.0
+        duration = max(0.05, min(duration, 5.0))  # Clamp to [0.05, 5.0] seconds
+        # Allow much higher intensity to generate aggressive CPU spikes
+        intensity = min(int(request.args.get('intensity', 5)), 500)  # Max 500 intensity
+
         logger.info(f"{endpoint_path}: Generating load duration={duration}s, intensity={intensity}")
         
         # Non-blocking CPU intensive work
@@ -222,7 +230,8 @@ def generate_load():
         
         while time.time() < end_time:
             # Do small chunks of work
-            for _ in range(intensity * 100):  # Reduced iterations
+            # Increase work proportional to intensity to amplify CPU usage
+            for _ in range(intensity * 200):
                 _ = sum(random.random() for _ in range(100))
                 iterations += 1
             

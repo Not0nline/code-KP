@@ -25,15 +25,15 @@ spec:
         - name: TARGET_NAMESPACE
           value: "default"
         - name: POLL_INTERVAL
-          value: "30"  # Reduced from 60 to match combined
+          value: "30"  # Keep slower to let built-in HPA lead
         - name: SCALING_COOLDOWN
           value: "60"
         - name: SCALING_THRESHOLD
           value: "0.5"
         - name: CPU_SCALE_UP_THRESHOLD
-          value: "70"
+          value: "80"
         - name: CPU_SCALE_DOWN_THRESHOLD
-          value: "30"
+          value: "40"
         - name: DEBUG_MODE
           value: "true"
         - name: PROMETHEUS_SERVER

@@ -26,15 +26,15 @@ spec:
         - name: TARGET_NAMESPACE
           value: "default"
         - name: POLL_INTERVAL
-          value: "30"
+          value: "15"
         - name: SCALING_COOLDOWN
-          value: "60"
+          value: "30"
         - name: SCALING_THRESHOLD
           value: "0.5"
         - name: CPU_SCALE_UP_THRESHOLD
-          value: "95"
+          value: "75"
         - name: CPU_SCALE_DOWN_THRESHOLD
-          value: "50"
+          value: "45"
         - name: DEBUG_MODE
           value: "true"
         - name: PROMETHEUS_SERVER
