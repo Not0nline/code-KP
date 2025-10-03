@@ -48,9 +48,9 @@ TEST_TARGETS = {
 
 # Traffic pattern configuration - 5-minute seasons with a single peak
 NORMAL_LOAD_RANGE = (5, 10)           # Higher baseline requests during normal periods  
-PEAK_LOAD_RANGE = (250, 400)          # More aggressive peak requests per second during high-demand periods
+PEAK_LOAD_RANGE = (150, 200)          # More aggressive peak requests per second during high-demand periods
 SEASON_DURATION = 300              # 5-minute seasons
-PEAK_DURATION = 60                 # Shorter, sharper peaks (60s instead of 30s)
+PEAK_DURATION = 120                 # Shorter, sharper peaks (60s instead of 30s)
 PEAK_START_OFFSET = 60             # Peak starts at 1 minute into each season
 VOLATILITY_FACTOR = 0.3            # Volatility for unpredictability (0 for perfectly repeatable)
 
@@ -175,8 +175,9 @@ class LoadTester:
 
     def generate_traffic_pattern(self):
         """
-        Generate a seasonal traffic pattern with a clear peak window per season.
-        Peak seconds draw from PEAK_LOAD_RANGE; normal seconds draw from NORMAL_LOAD_RANGE.
+        Generate a seasonal traffic pattern with a sudden spike during the peak window.
+        No smoothing: at PEAK_START_OFFSET an instant jump to PEAK_LOAD_RANGE occurs
+        for PEAK_DURATION seconds, then it drops back to NORMAL_LOAD_RANGE.
         """
         time_points = list(range(self.duration))
         request_rates = []
@@ -184,68 +185,37 @@ class LoadTester:
 
         normal_min, normal_max = NORMAL_LOAD_RANGE
         peak_min, peak_max = PEAK_LOAD_RANGE
-        
+
         # Calculate number of complete seasons
         num_complete_seasons = self.duration // SEASON_DURATION
-        logger.info(f"Generating {num_complete_seasons} complete seasons of {SEASON_DURATION} seconds each")
-        logger.info(f"Single-peak pattern: Peak at {PEAK_START_OFFSET}-{PEAK_START_OFFSET + PEAK_DURATION}s in each season")
+        peak_start = PEAK_START_OFFSET
+        peak_end = PEAK_START_OFFSET + PEAK_DURATION
+        logger.info(f"Generating {num_complete_seasons} seasons of {SEASON_DURATION} seconds each")
+        logger.info(f"Sudden spike pattern: Peak window is [{peak_start}, {peak_end}) each season")
         logger.info(f"Volatility factor: {VOLATILITY_FACTOR}")
 
         for second in time_points:
-            # Calculate position within the current season
-            season_position = second % SEASON_DURATION
-            season_number = second // SEASON_DURATION + 1
-            
-            # Single peak pattern: One peak per 5-minute season
-            peak_start = PEAK_START_OFFSET
-            peak_end = PEAK_START_OFFSET + PEAK_DURATION
-            
-            is_peak = (peak_start <= season_position < peak_end)
-            
-            if is_peak:
-                # Peak intensity sampled within the configured peak range
-                peak_progress = (season_position - peak_start) / PEAK_DURATION
-                load_type = "SEASONAL_PEAK"
+            # Position within current season
+            season_second = second % SEASON_DURATION
+            in_peak = (peak_start <= season_second < peak_end)
 
-                # Draw from peak range each peak second for stronger peaks
-                base_value = np.random.uniform(peak_min, peak_max)
-
-                # Quick ramp up/down at the first/last 10% of peak window
-                if peak_progress < 0.1:
-                    ramp_factor = peak_progress / 0.1
-                    base_value = normal_max + (base_value - normal_max) * ramp_factor
-                elif peak_progress > 0.9:
-                    ramp_factor = (1.0 - peak_progress) / 0.1
-                    base_value = normal_max + (base_value - normal_max) * ramp_factor
-
+            # Choose base rate range instantly switching at boundaries
+            if in_peak:
+                base = np.random.randint(peak_min, peak_max + 1)
+                load_types.append("SEASONAL_PEAK")
             else:
-                # Normal load sampled within normal range with a bit of seasonal sine variation
-                base_value = np.random.uniform(normal_min, normal_max)
-                load_type = "SEASONAL_NORMAL"
+                base = np.random.randint(normal_min, normal_max + 1)
+                load_types.append("SEASONAL_NORMAL")
 
-                normal_progress = season_position / SEASON_DURATION
-                sine_variation = VOLATILITY_FACTOR * (normal_max - normal_min) * np.sin(4 * np.pi * normal_progress)
-                base_value += sine_variation
-
-            # Add random volatility to break perfect predictability
+            # Apply symmetric jitter if configured
             if VOLATILITY_FACTOR > 0:
-                volatility_range = VOLATILITY_FACTOR * (peak_max - normal_min)
-                random_variation = np.random.uniform(-volatility_range/2, volatility_range/2)
-                base_value += random_variation
+                jitter_span = int(base * VOLATILITY_FACTOR)
+                if jitter_span > 0:
+                    jitter = np.random.randint(-jitter_span, jitter_span + 1)
+                    base = max(0, base + jitter)
 
-            final_load = max(1, round(base_value))
-            request_rates.append(final_load)
-            load_types.append(load_type)
+            request_rates.append(int(base))
 
-        rate_map = {second: rate for second, rate in zip(time_points, request_rates)}
-        # Save detailed pattern
-        with open(os.path.join(self.output_dir, "patterns", "detailed_pattern.csv"), 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(['second', 'requests', 'type'])
-            for s, r, t in zip(time_points, request_rates, load_types):
-                writer.writerow([s, r, t])
-
-        # Save a summary for the single-peak seasonal pattern
         pattern_summary = {
             "SEASONAL_NORMAL": {
                 "count": load_types.count("SEASONAL_NORMAL"),
@@ -257,27 +227,21 @@ class LoadTester:
             }
         }
 
-        num_complete_seasons = self.duration // SEASON_DURATION
         peak_seconds_per_season = PEAK_DURATION
         normal_seconds_per_season = SEASON_DURATION - PEAK_DURATION
 
         with open(os.path.join(self.output_dir, "patterns", "pattern_summary.txt"), 'w') as f:
-            f.write("SINGLE-PEAK SEASONAL TRAFFIC PATTERN\n")
-            f.write("===================================\n\n")
-            f.write("Simplified pattern for clear scaling behavior\n\n")
+            f.write("SUDDEN-SPIKE SEASONAL TRAFFIC PATTERN\n")
+            f.write("=====================================\n\n")
+            f.write("Pattern for triggering fast scale-up then allowing scale-down\n\n")
             f.write(f"Test Duration: {self.duration} seconds\n")
-            f.write(f"Season Duration: {SEASON_DURATION} seconds (5 minutes)\n")
+            f.write(f"Season Duration: {SEASON_DURATION} seconds\n")
             f.write(f"Complete Seasons: {num_complete_seasons}\n")
-            f.write(f"Peak: {PEAK_START_OFFSET}-{PEAK_START_OFFSET + PEAK_DURATION}s (1 minute into season)\n")
+            f.write(f"Peak Window: {PEAK_START_OFFSET}-{PEAK_START_OFFSET + PEAK_DURATION}s into each season\n")
             f.write(f"Peak Duration: {PEAK_DURATION} seconds\n")
             f.write(f"Normal Load: {NORMAL_LOAD_RANGE} req/sec\n")
             f.write(f"Peak Load: {PEAK_LOAD_RANGE} req/sec\n")
             f.write(f"Volatility: {VOLATILITY_FACTOR}\n\n")
-            f.write("Pattern features:\n")
-            f.write("- One peak per 5-minute season\n")
-            f.write("- Quick ramps at peak boundaries\n")
-            f.write("- Peak seconds draw from PEAK_LOAD_RANGE\n")
-            f.write("- Normal seconds draw from NORMAL_LOAD_RANGE\n\n")
             f.write("PATTERN BREAKDOWN\n")
             f.write("----------------\n")
             for pt, stats in pattern_summary.items():
@@ -285,9 +249,12 @@ class LoadTester:
             f.write(f"\nPer Season Breakdown:\n")
             f.write(f"- Normal: {normal_seconds_per_season} seconds per season\n")
             f.write(f"- Peak: {peak_seconds_per_season} seconds per season\n")
+
+        # Optional chart
         self.save_pattern_chart(time_points, request_rates, load_types)
-        logger.info("Generated seasonal traffic pattern")
-        logger.info(f"✅ {num_complete_seasons} single-peak seasons, each {SEASON_DURATION}s with peak at {PEAK_START_OFFSET}s")
+        logger.info("Generated sudden-spike seasonal traffic pattern")
+        logger.info(f"✅ {num_complete_seasons} seasons, each {SEASON_DURATION}s with peak at {PEAK_START_OFFSET}s")
+        rate_map = {second: rate for second, rate in zip(time_points, request_rates)}
         return rate_map
 
     def save_pattern_chart(self, time_points, request_rates, load_types):
