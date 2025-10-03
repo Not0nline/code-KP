@@ -43,11 +43,11 @@ spec:
         - name: NORMAL_MAX
           value: "5"
         - name: PEAK_MIN
-          value: "1500"
+          value: "300"
         - name: PEAK_MAX
-          value: "1600"
+          value: "400"
         - name: SEASON_DURATION
-          value: "600"
+          value: "300"
         - name: PEAK_DURATION
           value: "30"
         - name: PEAK_OFFSET
