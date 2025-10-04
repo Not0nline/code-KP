@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import requests
+from requests.adapters import HTTPAdapter
 import time
 import threading
 import numpy as np
@@ -13,7 +14,8 @@ import csv
 import shutil
 import json
 from requests.exceptions import ConnectTimeout, ReadTimeout
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
+from typing import Optional
 try:
     from prometheus_client import start_http_server as prom_start_http_server, Counter as PromCounter, Gauge as PromGauge
     PROM_AVAILABLE = True
@@ -22,6 +24,66 @@ except Exception:
     prom_start_http_server = None
     PromCounter = None
     PromGauge = None
+
+def _coerce_bool(value: str) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+CONFIG_SCHEMA = {
+    "TARGET": ("both", str),
+    "DURATION": (1800, int),
+    "HPA_URL": ("http://product-app-hpa-service.default.svc.cluster.local", str),
+    "COMBINED_URL": ("http://product-app-combined-service.default.svc.cluster.local", str),
+    "PREDICTIVE_URL": ("http://predictive-scaler.default.svc.cluster.local:5000", str),
+    "TEST_PREDICTIVE": (False, _coerce_bool),
+    "MAX_CONCURRENCY": (384, int),
+    "METRICS_PORT": (9105, int),
+    "NORMAL_MIN": (1, int),
+    "NORMAL_MAX": (3, int),
+    "PEAK_MIN": (5, int),
+    "PEAK_MAX": (10, int),
+    "SEASON_DURATION": (300, int),
+    "PEAK_DURATION": (60, int),
+    "PEAK_OFFSET": (60, int),
+    "VOLATILITY": (0.1, float),
+    "TIMEOUT": (60.0, float),
+    "LOAD_INTENSITY_NORMAL_MIN": (3, int),
+    "LOAD_INTENSITY_NORMAL_MAX": (8, int),
+    "LOAD_INTENSITY_PEAK_MIN": (15, int),
+    "LOAD_INTENSITY_PEAK_MAX": (30, int),
+    "LOAD_DURATION_NORMAL": (1.0, float),
+    "LOAD_DURATION_PEAK": (0.5, float),
+    "CLIENT_TIMEOUT_NORMAL": (15.0, float),
+    "CLIENT_TIMEOUT_PEAK": (10.0, float),
+    "TICK_GRACE": (2.0, float),
+    "MAX_RPS": (400, int),
+    "CHAOS_ERROR_RATE": (0.0, float),
+    "BURST_ON_PEAK_SECONDS": (2, int),
+    "BURST_ON_PEAK_MULTIPLIER": (1.5, float),
+    "CPU_THRESHOLD": (3.0, float),
+    "RPS_PER_POD": (50, int),
+}
+
+
+def _cast_value(raw_value, caster, default):
+    try:
+        return caster(raw_value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _load_config():
+    config = {}
+    for key, (default, caster) in CONFIG_SCHEMA.items():
+        raw = os.getenv(key)
+        if raw is None or raw == "":
+            config[key] = default
+        else:
+            config[key] = _cast_value(raw, caster, default)
+    return config
+
+
+CONFIG = _load_config()
 
 # Configure logging
 logging.basicConfig(
@@ -34,40 +96,67 @@ logging.basicConfig(
 )
 logger = logging.getLogger("load-tester")
 
-# Default endpoints
-DEFAULT_HPA_URL = "http://product-app-hpa-service.default.svc.cluster.local"
-DEFAULT_COMBINED_URL = "http://product-app-combined-service.default.svc.cluster.local"
-DEFAULT_PREDICTIVE_URL = "http://predictive-scaler.default.svc.cluster.local:5000"
-
-# Test target configuration - Choose which services to test
+# Default endpoints sourced from configuration
+DEFAULT_HPA_URL = CONFIG["HPA_URL"]
+DEFAULT_COMBINED_URL = CONFIG["COMBINED_URL"]
+DEFAULT_PREDICTIVE_URL = CONFIG["PREDICTIVE_URL"]
 TEST_TARGETS = {
     "hpa": False,        # Test HPA service
     "combined": True,    # Test Combined service  
     "predictive": True   # Test Predictive service
 }
 
-# Traffic pattern configuration - 5-minute seasons with a single peak
-NORMAL_LOAD_RANGE = (5, 10)           # Higher baseline requests during normal periods  
-PEAK_LOAD_RANGE = (150, 200)          # More aggressive peak requests per second during high-demand periods
-SEASON_DURATION = 300              # 5-minute seasons
-PEAK_DURATION = 120                 # Shorter, sharper peaks (60s instead of 30s)
-PEAK_START_OFFSET = 60             # Peak starts at 1 minute into each season
-VOLATILITY_FACTOR = 0.3            # Volatility for unpredictability (0 for perfectly repeatable)
+# Traffic pattern configuration - seasons with a single, sharp peak
+NORMAL_LOAD_RANGE = (CONFIG["NORMAL_MIN"], CONFIG["NORMAL_MAX"])
+PEAK_LOAD_RANGE = (CONFIG["PEAK_MIN"], CONFIG["PEAK_MAX"])
+SEASON_DURATION = CONFIG["SEASON_DURATION"]
+PEAK_DURATION = CONFIG["PEAK_DURATION"]
+PEAK_START_OFFSET = CONFIG["PEAK_OFFSET"]
+VOLATILITY_FACTOR = CONFIG["VOLATILITY"]
+
+# Extra burst right at peak start to emulate a DDoS-like surge
+BURST_ON_PEAK_SECONDS = CONFIG["BURST_ON_PEAK_SECONDS"]
+BURST_ON_PEAK_MULTIPLIER = CONFIG["BURST_ON_PEAK_MULTIPLIER"]
 
 # Endpoint weights (probability distribution)
 ENDPOINT_WEIGHTS = {
     "product_list": 0.45,       # 45% of requests to /product/list
     "product_create": 0.35,     # 35% of requests to /product/create
-    "load": 0.1,              # 10% to generate load via /load
-    "health": 0.1             # 10% to /health endpoint
+    "load": 0.1,                # 10% to generate load via /load
+    "health": 0.1               # 10% to /health endpoint
 }
 
+# Heavier distribution during spike windows (more CPU-heavy traffic)
+PEAK_ENDPOINT_WEIGHTS = {
+    "product_list": 0.25,
+    "product_create": 0.20,
+    "load": 0.50,
+    "health": 0.05,
+}
+
+# Intensity ranges for /load endpoint - DRASTICALLY reduced to prevent timeouts
+# The /load endpoint does intensity*200 iterations, each with 100 random ops
+# intensity=80 = 1.6 MILLION operations = 3-5 seconds response time!
+LOAD_INTENSITY_NORMAL = (
+    CONFIG["LOAD_INTENSITY_NORMAL_MIN"],
+    CONFIG["LOAD_INTENSITY_NORMAL_MAX"],
+)
+LOAD_INTENSITY_PEAK = (
+    CONFIG["LOAD_INTENSITY_PEAK_MIN"],
+    CONFIG["LOAD_INTENSITY_PEAK_MAX"],
+)
+
+# Duration ranges (seconds) for /load endpoint
+# Longer duration with lower intensity = more CPU work spread over time
+LOAD_DURATION_NORMAL = CONFIG["LOAD_DURATION_NORMAL"]
+LOAD_DURATION_PEAK = CONFIG["LOAD_DURATION_PEAK"]
+
 # Request timeout (in seconds; increased to accommodate load endpoint)
-REQUEST_TIMEOUT = 60
+REQUEST_TIMEOUT = CONFIG["TIMEOUT"]
 
 # Updated config for autoscaler (if used in integration tests)
 # In your autoscaler config the CPU threshold is set to 3%
-CPU_THRESHOLD = 3.0  # 3%
+CPU_THRESHOLD = CONFIG["CPU_THRESHOLD"]
 
 class LoadTester:
     """
@@ -75,22 +164,32 @@ class LoadTester:
     at a manageable load level using a moderately volatile traffic pattern.
     """
     def __init__(self, hpa_url, combined_url, predictive_url=None,
-                 duration=3600, output_dir="./load_test_results",
+                 duration=None, output_dir="./load_test_results",
                  test_hpa=True, test_combined=True, test_predictive=True,
-                 max_concurrency: int = 256,
+                 max_concurrency: int = CONFIG["MAX_CONCURRENCY"],
                  metrics_enabled: bool = False,
-                 chaos_error_rate: float = 0.0):
+                 chaos_error_rate: float = CONFIG["CHAOS_ERROR_RATE"],
+                 client_timeout_normal: float = CONFIG["CLIENT_TIMEOUT_NORMAL"],
+                 client_timeout_peak: float = CONFIG["CLIENT_TIMEOUT_PEAK"],
+                 tick_grace: float = CONFIG["TICK_GRACE"],
+                 max_rps: int = CONFIG["MAX_RPS"]):
         """Initialize the load tester."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = os.path.join(output_dir, f"test_run_{timestamp}")
         self.hpa_url = hpa_url
         self.combined_url = combined_url
         self.predictive_url = predictive_url
-        self.duration = duration
+        self.duration = duration if duration is not None else CONFIG["DURATION"]
         self.stop_event = threading.Event()
         self.max_concurrency = max(1, int(max_concurrency))
         self.metrics_enabled = bool(metrics_enabled and PROM_AVAILABLE)
         self.chaos_error_rate = max(0.0, min(1.0, float(chaos_error_rate)))
+
+        # Client behavior tuning
+        self.client_timeout_normal = float(client_timeout_normal)
+        self.client_timeout_peak = float(client_timeout_peak)
+        self.tick_grace = float(tick_grace)
+        self.max_rps = int(max(1, max_rps))
 
         # Test target flags
         self.test_hpa = test_hpa
@@ -111,11 +210,33 @@ class LoadTester:
         os.makedirs(os.path.join(self.output_dir, "patterns"), exist_ok=True)
         self.start_time = None
 
-        # Thread safety for product lists
+        # Thread safety for product lists AND results lists
         self.hpa_lock = threading.Lock()
         self.combined_lock = threading.Lock()
+        # CRITICAL: Need locks for results lists too - multiple threads append simultaneously!
+        self.hpa_results_lock = threading.Lock()
+        self.combined_results_lock = threading.Lock()
 
         self.current_request_rate = 0
+
+        # HTTP sessions with pooled connections per service for higher throughput
+        self.sessions = {}
+        adapter = HTTPAdapter(pool_connections=self.max_concurrency, pool_maxsize=self.max_concurrency)
+        if self.test_hpa:
+            s = requests.Session()
+            s.mount('http://', adapter)
+            s.mount('https://', adapter)
+            self.sessions['HPA'] = s
+        if self.test_combined:
+            s = requests.Session()
+            s.mount('http://', adapter)
+            s.mount('https://', adapter)
+            self.sessions['Combined'] = s
+        if self.test_predictive:
+            s = requests.Session()
+            s.mount('http://', adapter)
+            s.mount('https://', adapter)
+            self.sessions['Predictive'] = s
 
         # Metrics setup
         self.prev_indices = {}
@@ -125,6 +246,9 @@ class LoadTester:
             )
             self.metrics_rps = PromGauge(
                 'load_tester_rps', 'Per-second achieved RPS by service', ['service']
+            )
+            self.metrics_scheduled_rps = PromGauge(
+                'load_tester_scheduled_rps', 'Per-second scheduled RPS by service', ['service']
             )
             self.metrics_error_rate = PromGauge(
                 'load_tester_error_rate', 'Per-second error rate by service', ['service']
@@ -146,15 +270,20 @@ class LoadTester:
         logger.info(f"Testing services: {', '.join(active_services)}")
         logger.info(f"Results will be saved to: {self.output_dir}")
 
-    def _update_client_metrics_for_service(self, service_name: str, results_list: list):
+    def _update_client_metrics_for_service(self, service_name: str, results_list: list, lock: threading.Lock):
         if not self.metrics_enabled:
             return
-        start_idx = self.prev_indices.get(service_name, 0)
-        new_entries = results_list[start_idx:]
-        total = len(new_entries)
-        successes = sum(1 for r in new_entries if 200 <= r.get('status_code', 0) < 400)
-        errors = total - successes
-        # Set gauges for this second
+        # CRITICAL: Lock while reading results_list to prevent race conditions
+        with lock:
+            start_idx = self.prev_indices.get(service_name, 0)
+            new_entries = results_list[start_idx:]
+            total = len(new_entries)
+            successes = sum(1 for r in new_entries if 200 <= r.get('status_code', 0) < 400)
+            errors = total - successes
+            # Advance index while still holding lock
+            self.prev_indices[service_name] = start_idx + total
+        
+        # Set gauges for this second (outside lock - metrics are thread-safe)
         self.metrics_rps.labels(service=service_name).set(total)
         self.metrics_error_rate.labels(service=service_name).set((errors / total) if total > 0 else 0.0)
         # Increment counters cumulatively
@@ -162,16 +291,14 @@ class LoadTester:
             self.metrics_requests_total.labels(service=service_name, outcome='success').inc(successes)
         if errors:
             self.metrics_requests_total.labels(service=service_name, outcome='error').inc(errors)
-        # Advance index
-        self.prev_indices[service_name] = start_idx + total
 
     def update_client_metrics(self):
         if not self.metrics_enabled:
             return
         if self.test_hpa:
-            self._update_client_metrics_for_service('HPA', self.hpa_results)
+            self._update_client_metrics_for_service('HPA', self.hpa_results, self.hpa_results_lock)
         if self.test_combined:
-            self._update_client_metrics_for_service('Combined', self.combined_results)
+            self._update_client_metrics_for_service('Combined', self.combined_results, self.combined_results_lock)
 
     def generate_traffic_pattern(self):
         """
@@ -337,7 +464,7 @@ class LoadTester:
             "endpoint_type": "predict"
         })
 
-    def make_requests(self, url, second, request_count, results_list, products_list, lock, name):
+    def make_requests(self, url, second, request_count, results_list, products_list, lock, name, task_list=None, is_peak: bool = False, start_barrier: Optional[threading.Barrier] = None):
         """
         Make 'request_count' requests to a target URL, using concurrency so we can
         actually hit high RPS during peaks. Results are appended to results_list.
@@ -347,7 +474,16 @@ class LoadTester:
         if request_count <= 0:
             return 0, 0
 
-        def do_single_request():
+        # Choose weights based on peak vs normal window
+        selected_weights = PEAK_ENDPOINT_WEIGHTS if is_peak else ENDPOINT_WEIGHTS
+
+        # Slightly longer per-request timeouts (configurable) to reduce premature client errors
+        per_request_timeout = min(
+            REQUEST_TIMEOUT,
+            self.client_timeout_peak if is_peak else self.client_timeout_normal
+        )
+
+        def do_single_request(task=None):
             # Optional: inject a client-side failure before sending any request
             try:
                 if self.chaos_error_rate > 0.0 and np.random.rand() < self.chaos_error_rate:
@@ -357,48 +493,58 @@ class LoadTester:
                 endpoint_type = 'chaos'
                 method = 'GET'
                 endpoint = '/chaos'
-                results_list.append({
-                    "timestamp": datetime.now().isoformat(),
-                    "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
-                    "url": url,
-                    "method": method,
-                    "endpoint": endpoint,
-                    "status_code": -1,
-                    "response_time_ms": -1,
-                    "error": str(e),
-                    "request_count": request_count,
-                    "service": name,
-                    "endpoint_type": endpoint_type
-                })
+                # CRITICAL: Lock when appending to results_list
+                with lock:
+                    results_list.append({
+                        "timestamp": datetime.now().isoformat(),
+                        "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
+                        "url": url,
+                        "method": method,
+                        "endpoint": endpoint,
+                        "status_code": -1,
+                        "response_time_ms": -1,
+                        "error": str(e),
+                        "request_count": request_count,
+                        "service": name,
+                        "endpoint_type": endpoint_type
+                    })
                 return 0
-            endpoint_type = np.random.choice(
-                list(ENDPOINT_WEIGHTS.keys()),
-                p=list(ENDPOINT_WEIGHTS.values())
-            )
-            method = "GET"
-            data = None
-            endpoint = "/health"
-            if endpoint_type == "product_list":
-                endpoint = "/product/list"
-            elif endpoint_type == "product_create":
-                method = "POST"
-                endpoint = "/product/create"
-                data = self.generate_product_data()
-            elif endpoint_type == "load":
-                duration_param = 1
-                intensity = np.random.randint(10, 30)
-                endpoint = f"/load?duration={duration_param}&intensity={intensity}"
-            elif endpoint_type == "health":
+            if task is not None:
+                endpoint_type = task.get('endpoint_type', 'health')
+                method = task.get('method', 'GET')
+                data = task.get('data')
+                endpoint = task.get('endpoint', '/health')
+            else:
+                endpoint_type = np.random.choice(
+                    list(selected_weights.keys()),
+                    p=list(selected_weights.values())
+                )
+                method = "GET"
+                data = None
                 endpoint = "/health"
+                if endpoint_type == "product_list":
+                    endpoint = "/product/list"
+                elif endpoint_type == "product_create":
+                    method = "POST"
+                    endpoint = "/product/create"
+                    data = self.generate_product_data()
+                elif endpoint_type == "load":
+                    duration_param = LOAD_DURATION_PEAK if is_peak else LOAD_DURATION_NORMAL
+                    low, high = LOAD_INTENSITY_PEAK if is_peak else LOAD_INTENSITY_NORMAL
+                    intensity = np.random.randint(low, high)
+                    endpoint = f"/load?duration={duration_param}&intensity={intensity}"
+                elif endpoint_type == "health":
+                    endpoint = "/health"
 
             start_time = time.time()
             full_url = f"{url}{endpoint}"
             try:
+                session = self.sessions.get(name)
                 if method == "GET":
-                    response = requests.get(full_url, timeout=REQUEST_TIMEOUT)
+                    response = (session.get if session else requests.get)(full_url, timeout=per_request_timeout)
                 else:
                     headers = {'Content-Type': 'application/json'}
-                    response = requests.post(full_url, data=json.dumps(data), headers=headers, timeout=REQUEST_TIMEOUT)
+                    response = (session.post if session else requests.post)(full_url, data=json.dumps(data), headers=headers, timeout=per_request_timeout)
                 end_time = time.time()
                 status_code = response.status_code
                 response_time_ms = (end_time - start_time) * 1000
@@ -412,73 +558,100 @@ class LoadTester:
                             logger.debug(f"Created product {product_id} for {name}")
                     except Exception as e:
                         logger.debug(f"Could not extract product ID: {e}")
-                results_list.append({
-                    "timestamp": datetime.now().isoformat(),
-                    "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
-                    "url": url,
-                    "method": method,
-                    "endpoint": endpoint,
-                    "status_code": status_code,
-                    "response_time_ms": response_time_ms,
-                    "request_count": request_count,
-                    "service": name,
-                    "endpoint_type": endpoint_type
-                })
+                # CRITICAL: Lock when appending to results_list
+                with lock:
+                    results_list.append({
+                        "timestamp": datetime.now().isoformat(),
+                        "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
+                        "url": url,
+                        "method": method,
+                        "endpoint": endpoint,
+                        "status_code": status_code,
+                        "response_time_ms": response_time_ms,
+                        "request_count": request_count,
+                        "service": name,
+                        "endpoint_type": endpoint_type
+                    })
                 return 1 if 200 <= status_code < 400 else 0
             except (ConnectTimeout, ReadTimeout) as e:
                 logger.error(f"{name} service timed out to {full_url}: {e}")
-                results_list.append({
-                    "timestamp": datetime.now().isoformat(),
-                    "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
-                    "url": url,
-                    "method": method,
-                    "endpoint": endpoint,
-                    "status_code": -1,
-                    "response_time_ms": -1,
-                    "error": f"{name} service timeout: {str(e)}",
-                    "request_count": request_count,
-                    "service": name,
-                    "endpoint_type": endpoint_type
-                })
+                # CRITICAL: Lock when appending to results_list
+                with lock:
+                    results_list.append({
+                        "timestamp": datetime.now().isoformat(),
+                        "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
+                        "url": url,
+                        "method": method,
+                        "endpoint": endpoint,
+                        "status_code": -1,
+                        "response_time_ms": -1,
+                        "error": f"{name} service timeout: {str(e)}",
+                        "request_count": request_count,
+                        "service": name,
+                        "endpoint_type": endpoint_type
+                    })
                 return 0
             except Exception as e:
                 logger.error(f"[{name} service] failed to {full_url}: {e}")
-                results_list.append({
-                    "timestamp": datetime.now().isoformat(),
-                    "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
-                    "url": url,
-                    "method": method,
-                    "endpoint": endpoint,
-                    "status_code": -1,
-                    "response_time_ms": -1,
-                    "error": f"{name} service failed: {str(e)}",
-                    "request_count": request_count,
-                    "service": name,
-                    "endpoint_type": endpoint_type
-                })
+                # CRITICAL: Lock when appending to results_list
+                with lock:
+                    results_list.append({
+                        "timestamp": datetime.now().isoformat(),
+                        "elapsed_seconds": int((datetime.now() - self.start_time).total_seconds()),
+                        "url": url,
+                        "method": method,
+                        "endpoint": endpoint,
+                        "status_code": -1,
+                        "response_time_ms": -1,
+                        "error": f"{name} service failed: {str(e)}",
+                        "request_count": request_count,
+                        "service": name,
+                        "endpoint_type": endpoint_type
+                    })
                 return 0
 
+        # Synchronize batch start across services to improve fairness
+        if start_barrier is not None:
+            try:
+                start_barrier.wait(timeout=2.0)
+            except Exception:
+                pass
+
+        # Use per-second executor with proper rate limiting - wait for all tasks to complete
+        # This ensures we don't accumulate tasks across seconds and both services get equal treatment
+        max_workers = min(self.max_concurrency, request_count)
+        batch_deadline = self.start_time + timedelta(seconds=second + 1 + self.tick_grace)
+        
         successes = 0
         failures = 0
-        max_workers = min(self.max_concurrency, request_count)
-        # Fire requests concurrently; executor will queue extras if request_count > max_workers
+        
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(do_single_request) for _ in range(request_count)]
-            for f in as_completed(futures):
-                try:
-                    ok = f.result()
-                    if ok:
-                        successes += 1
-                    else:
+            if task_list is not None and len(task_list) == request_count:
+                futures = [executor.submit(do_single_request, task) for task in task_list]
+            else:
+                futures = [executor.submit(do_single_request) for _ in range(request_count)]
+            
+            # Wait for completion with grace period, but don't forcefully cancel
+            # Just let slow requests finish naturally via their own timeouts
+            timeout_remaining = (batch_deadline - datetime.now()).total_seconds()
+            if timeout_remaining > 0:
+                wait(futures, timeout=timeout_remaining)
+            
+            # Count completed futures - don't force-cancel incomplete ones
+            for f in futures:
+                if f.done():
+                    try:
+                        result = f.result(timeout=0)
+                        if result == 1:
+                            successes += 1
+                        else:
+                            failures += 1
+                    except Exception:
                         failures += 1
-                except Exception as e:
-                    failures += 1
-                    logger.debug(f"Request future error: {e}")
-
+        
         if request_count > 0:
-            total = successes + failures
-            success_rate = (successes / total) * 100 if total > 0 else 0
-            logger.debug(f"Second {second}: Made {total} requests to {name} (S:{successes}/F:{failures}, {success_rate:.1f}% success)")
+            logger.debug(f"Second {second}: {name} scheduled {request_count}, completed {successes + failures} (S:{successes}/F:{failures})")
+        
         return successes, failures
 
     def run_test(self):
@@ -513,7 +686,7 @@ class LoadTester:
             if self.stop_event.is_set():
                 logger.info("Stopping test early due to stop event")
                 break
-                
+            
             request_count = self.request_pattern.get(second, 1)
             rate_history.append(request_count)
             if len(rate_history) > 120:
@@ -523,33 +696,83 @@ class LoadTester:
             # Determine pattern type based on seasonal position
             season_position = second % SEASON_DURATION
             is_peak = (PEAK_START_OFFSET <= season_position < PEAK_START_OFFSET + PEAK_DURATION)
-            
+            # Apply burst multiplier for the first few seconds of the peak window
             if is_peak:
-                pattern_type = "SEASONAL_PEAK"
-            else:
-                pattern_type = "SEASONAL_NORMAL"
-                
+                seconds_into_peak = season_position - PEAK_START_OFFSET
+                if 0 <= seconds_into_peak < BURST_ON_PEAK_SECONDS:
+                    request_count = int(request_count * BURST_ON_PEAK_MULTIPLIER)
+
+            # Clamp final intended RPS to configured maximum
+            if request_count > self.max_rps:
+                request_count = self.max_rps
+
+            # Publish scheduled RPS for visibility (final intended per-second sends after burst/clamp)
+            if self.metrics_enabled and hasattr(self, 'metrics_scheduled_rps'):
+                if self.test_hpa:
+                    self.metrics_scheduled_rps.labels(service='HPA').set(request_count)
+                if self.test_combined:
+                    self.metrics_scheduled_rps.labels(service='Combined').set(request_count)
+            
+            # Log the scheduled count every 10 seconds to verify fairness
+            if second % 10 == 0:
+                logger.info(f"Second {second}: Scheduling {request_count} requests to EACH service (HPA + Combined)")
+            
+            pattern_type = "SEASONAL_PEAK" if is_peak else "SEASONAL_NORMAL"
             if pattern_type != current_pattern_type:
-                logger.info(f"Second {second}: Pattern changed from {current_pattern_type} to {pattern_type}")
+                logger.info(f"Second {second}: Pattern changed from {current_pattern_type} to {pattern_type}, scheduling {request_count} req/s")
                 current_pattern_type = pattern_type
+
+            # Pre-build identical batch for both services if both are enabled
+            task_batch = None
+            if self.test_hpa and self.test_combined:
+                task_batch = []
+                for _ in range(request_count):
+                    weight_dict = PEAK_ENDPOINT_WEIGHTS if is_peak else ENDPOINT_WEIGHTS
+                    endpoint_type = np.random.choice(list(weight_dict.keys()), p=list(weight_dict.values()))
+                    method = "GET"
+                    data = None
+                    endpoint = "/health"
+                    if endpoint_type == "product_list":
+                        endpoint = "/product/list"
+                    elif endpoint_type == "product_create":
+                        method = "POST"
+                        endpoint = "/product/create"
+                        data = self.generate_product_data()
+                    elif endpoint_type == "load":
+                        duration_param = LOAD_DURATION_PEAK if is_peak else LOAD_DURATION_NORMAL
+                        low, high = LOAD_INTENSITY_PEAK if is_peak else LOAD_INTENSITY_NORMAL
+                        intensity = np.random.randint(low, high)
+                        endpoint = f"/load?duration={duration_param}&intensity={intensity}"
+                    elif endpoint_type == "health":
+                        endpoint = "/health"
+                    task_batch.append({'endpoint_type': endpoint_type, 'method': method, 'endpoint': endpoint, 'data': data})
 
             # Create threads only for selected services
             threads = []
             
+            # If testing both services, synchronize their batch start with a barrier
+            start_barrier = threading.Barrier(2) if (self.test_hpa and self.test_combined) else None
+
             if self.test_hpa:
                 hpa_thread = threading.Thread(
-                    target=lambda: self.make_requests(
-                        self.hpa_url, second, request_count,
-                        self.hpa_results, self.hpa_products, self.hpa_lock, "HPA"
+                    target=lambda s=second, rc=request_count, tb=task_batch, ip=is_peak, sb=start_barrier: self.make_requests(
+                        self.hpa_url, s, rc,
+                        self.hpa_results, self.hpa_products, self.hpa_lock, "HPA",
+                        task_list=tb if tb is not None else None,
+                        is_peak=ip,
+                        start_barrier=sb
                     )
                 )
                 threads.append(hpa_thread)
 
             if self.test_combined:
                 combined_thread = threading.Thread(
-                    target=lambda: self.make_requests(
-                        self.combined_url, second, request_count,
-                        self.combined_results, self.combined_products, self.combined_lock, "Combined"
+                    target=lambda s=second, rc=request_count, tb=task_batch, ip=is_peak, sb=start_barrier: self.make_requests(
+                        self.combined_url, s, rc,
+                        self.combined_results, self.combined_products, self.combined_lock, "Combined",
+                        task_list=tb if tb is not None else None,
+                        is_peak=ip,
+                        start_barrier=sb
                     )
                 )
                 threads.append(combined_thread)
@@ -563,8 +786,7 @@ class LoadTester:
             # Start all threads
             for thread in threads:
                 thread.start()
-            
-            # Wait for threads to complete to keep per-second counts equal across services
+            # Wait for threads to complete
             for thread in threads:
                 thread.join()
 
@@ -575,43 +797,35 @@ class LoadTester:
             elapsed_in_second = (datetime.now() - (self.start_time + timedelta(seconds=second))).total_seconds()
             if elapsed_in_second < 1.0:
                 time.sleep(1.0 - elapsed_in_second)
-                
-            # Print progress every 30 seconds
+            
+            # Progress logs
             if second % 30 == 0 and second > 0:
                 elapsed = second
                 remaining = self.duration - second
                 progress = elapsed / self.duration * 100
-                
-                # Calculate counts and success rates only for active services
                 counts = {}
                 success_rates = {}
-                
                 if self.test_hpa:
-                    hpa_count = len(self.hpa_results)
-                    hpa_successes = sum(1 for r in self.hpa_results if 200 <= r.get("status_code", 0) < 400)
-                    hpa_success_rate = hpa_successes / hpa_count * 100 if hpa_count > 0 else 0
+                    # CRITICAL: Lock when reading results_list to prevent race conditions
+                    with self.hpa_results_lock:
+                        hpa_count = len(self.hpa_results)
+                        hpa_successes = sum(1 for r in self.hpa_results if 200 <= r.get("status_code", 0) < 400)
                     counts["HPA"] = hpa_count
-                    success_rates["HPA"] = hpa_success_rate
-                
+                    success_rates["HPA"] = (hpa_successes / hpa_count * 100) if hpa_count > 0 else 0
                 if self.test_combined:
-                    combined_count = len(self.combined_results)
-                    combined_successes = sum(1 for r in self.combined_results if 200 <= r.get("status_code", 0) < 400)
-                    combined_success_rate = combined_successes / combined_count * 100 if combined_count > 0 else 0
+                    # CRITICAL: Lock when reading results_list to prevent race conditions
+                    with self.combined_results_lock:
+                        combined_count = len(self.combined_results)
+                        combined_successes = sum(1 for r in self.combined_results if 200 <= r.get("status_code", 0) < 400)
                     counts["Combined"] = combined_count
-                    success_rates["Combined"] = combined_success_rate
-
+                    success_rates["Combined"] = (combined_successes / combined_count * 100) if combined_count > 0 else 0
                 avg_rate = sum(rate_history[-30:]) / min(30, len(rate_history[-30:]))
-                
                 logger.info(f"Progress: {elapsed}/{self.duration} seconds ({progress:.1f}%). Remaining: {remaining} seconds")
                 logger.info(f"Current request rate: {request_count}/sec, Avg last 30s: {avg_rate:.1f}/sec")
-                
-                # Log counts and success rates for active services
                 count_msg = ", ".join([f"{svc}={count}" for svc, count in counts.items()])
                 success_msg = ", ".join([f"{svc}={rate:.1f}%" for svc, rate in success_rates.items()])
                 logger.info(f"Requests made: {count_msg}")
                 logger.info(f"Success rates: {success_msg}")
-                
-                # Log products created for active services
                 product_msg = []
                 if self.test_hpa:
                     product_msg.append(f"HPA={len(self.hpa_products)}")
@@ -619,24 +833,22 @@ class LoadTester:
                     product_msg.append(f"Combined={len(self.combined_products)}")
                 if product_msg:
                     logger.info(f"Products created: {', '.join(product_msg)}")
-                
                 if second % 300 == 0 and second > 0:
                     self.save_partial_results(f"partial_{second}")
 
         end_time = datetime.now()
         logger.info(f"Test ended at {end_time.isoformat()}")
         logger.info(f"Total duration: {(end_time - self.start_time).total_seconds():.1f} seconds")
-        
-        # Final counts for active services
         final_counts = {}
         if self.test_hpa:
-            final_counts["HPA"] = len(self.hpa_results)
+            with self.hpa_results_lock:
+                final_counts["HPA"] = len(self.hpa_results)
         if self.test_combined:
-            final_counts["Combined"] = len(self.combined_results)
-            
-        count_msg = ", ".join([f"{svc}={count}" for svc, count in final_counts.items()])
-        logger.info(f"Total requests: {count_msg}")
-        
+            with self.combined_results_lock:
+                final_counts["Combined"] = len(self.combined_results)
+        logger.info(
+            f"Total requests: {', '.join([f'{svc}={count}' for svc, count in final_counts.items()])}"
+        )
         product_msg = []
         if self.test_hpa:
             product_msg.append(f"HPA={len(self.hpa_products)}")
@@ -644,23 +856,35 @@ class LoadTester:
             product_msg.append(f"Combined={len(self.combined_products)}")
         if product_msg:
             logger.info(f"Products created: {', '.join(product_msg)}")
-
-        self.save_results()
         
+        self.save_results()
         try:
             shutil.copy('load_test.log', os.path.join(self.output_dir, 'load_test.log'))
             logger.info(f"Load test log copied to {self.output_dir}/load_test.log")
         except Exception as e:
             logger.error(f"Could not copy log file: {e}")
-
+        # CRITICAL: Lock when reading results for final summary
+        hpa_req_count = 0
+        combined_req_count = 0
+        hpa_success = 0.0
+        combined_success = 0.0
+        if self.test_hpa:
+            with self.hpa_results_lock:
+                hpa_req_count = len(self.hpa_results)
+                hpa_success = self.calculate_success_rate(self.hpa_results)
+        if self.test_combined:
+            with self.combined_results_lock:
+                combined_req_count = len(self.combined_results)
+                combined_success = self.calculate_success_rate(self.combined_results)
+        
         return {
             "start_time": self.start_time.isoformat(),
             "end_time": end_time.isoformat(),
             "duration_seconds": (end_time - self.start_time).total_seconds(),
-            "hpa_requests": len(self.hpa_results) if self.test_hpa else 0,
-            "combined_requests": len(self.combined_results) if self.test_combined else 0,
-            "hpa_success_rate": self.calculate_success_rate(self.hpa_results) if self.test_hpa else 0,
-            "combined_success_rate": self.calculate_success_rate(self.combined_results) if self.test_combined else 0,
+            "hpa_requests": hpa_req_count,
+            "combined_requests": combined_req_count,
+            "hpa_success_rate": hpa_success,
+            "combined_success_rate": combined_success,
             "hpa_products_created": len(self.hpa_products) if self.test_hpa else 0,
             "combined_products_created": len(self.combined_products) if self.test_combined else 0,
             "output_directory": self.output_dir
@@ -865,34 +1089,56 @@ class LoadTester:
 
 def parse_arguments():
     """Parse command line arguments for the load test."""
-    parser = argparse.ArgumentParser(description='Run functional load test for product app')
+    parser = argparse.ArgumentParser(
+        description='Run functional load test for product app',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
     
     # Service selection arguments
-    parser.add_argument('--target', type=str, choices=['hpa', 'combined', 'both'], default='both',
-                      help='Which service(s) to test: hpa, combined, or both (default: both)')
+    parser.add_argument('--target', type=str, choices=['hpa', 'combined', 'both'], default=CONFIG["TARGET"],
+                      help="Which service(s) to test: hpa, combined, or both")
     parser.add_argument('--hpa-url', type=str, default=DEFAULT_HPA_URL, help='URL for HPA service')
     parser.add_argument('--combined-url', type=str, default=DEFAULT_COMBINED_URL, help='URL for Combined service')
     parser.add_argument('--predictive-url', type=str, default=DEFAULT_PREDICTIVE_URL, help='URL for Predictive Scaler service')
     parser.add_argument('--test-predictive', action='store_true', default=False, help='Include predictive scaler in testing')
     
     # Test configuration arguments
-    parser.add_argument('--duration', type=int, default=1800, help='Test duration in seconds (default: 1800 = 6 complete seasons)')
+    parser.add_argument('--duration', type=int, default=CONFIG["DURATION"],
+                      help='Test duration in seconds')
     parser.add_argument('--output-dir', type=str, default='./load_test_results', help='Output directory for results')
-    parser.add_argument('--max-concurrency', type=int, default=128, help='Max parallel requests per service per second (default: 128)')
-    parser.add_argument('--chaos-error-rate', type=float, default=0.0, help='Probability [0-1] to inject a client-side failure to increase error rate')
-    parser.add_argument('--metrics-port', type=int, default=0, help='If > 0, expose Prometheus metrics on this port')
+    parser.add_argument('--max-concurrency', type=int, default=CONFIG["MAX_CONCURRENCY"],
+                      help='Max parallel requests per service per second')
+    parser.add_argument('--chaos-error-rate', type=float, default=CONFIG["CHAOS_ERROR_RATE"],
+                      help='Probability [0-1] to inject a client-side failure to increase error rate')
+    parser.add_argument('--metrics-port', type=int, default=CONFIG["METRICS_PORT"],
+                      help='If > 0, expose Prometheus metrics on this port')
+    parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducible traffic pattern')
+    parser.add_argument('--auto-peak', action='store_true', default=False,
+                        help='Auto-calc peak req/s to target roughly eighty percent utilization of 10 pods')
+    parser.add_argument('--rps-per-pod', type=int, default=CONFIG["RPS_PER_POD"],
+                      help='Estimated sustainable RPS per pod at 70 percent CPU (used for --auto-peak)')
     
     # Seasonal pattern arguments
-    parser.add_argument('--normal-min', type=int, default=NORMAL_LOAD_RANGE[0], help=f'Minimum normal requests (default: {NORMAL_LOAD_RANGE[0]})')
-    parser.add_argument('--normal-max', type=int, default=NORMAL_LOAD_RANGE[1], help=f'Maximum normal requests (default: {NORMAL_LOAD_RANGE[1]})')
-    parser.add_argument('--peak-min', type=int, default=PEAK_LOAD_RANGE[0], help=f'Minimum peak requests (default: {PEAK_LOAD_RANGE[0]})')
-    parser.add_argument('--peak-max', type=int, default=PEAK_LOAD_RANGE[1], help=f'Maximum peak requests (default: {PEAK_LOAD_RANGE[1]})')
-    parser.add_argument('--season-duration', type=int, default=SEASON_DURATION, help=f'Duration of each season (default: {SEASON_DURATION}s)')
-    parser.add_argument('--peak-duration', type=int, default=PEAK_DURATION, help=f'Duration of peak within season (default: {PEAK_DURATION}s)')
-    parser.add_argument('--peak-offset', type=int, default=PEAK_START_OFFSET, help=f'Peak start offset in season (default: {PEAK_START_OFFSET}s)')
-    parser.add_argument('--volatility', type=float, default=VOLATILITY_FACTOR, help=f'Volatility factor (default: {VOLATILITY_FACTOR} = perfect predictability)')
-    parser.add_argument('--timeout', type=int, default=REQUEST_TIMEOUT, help=f'Request timeout in seconds (default: {REQUEST_TIMEOUT})')
-    
+    parser.add_argument('--normal-min', type=int, default=NORMAL_LOAD_RANGE[0], help='Minimum normal requests per second')
+    parser.add_argument('--normal-max', type=int, default=NORMAL_LOAD_RANGE[1], help='Maximum normal requests per second')
+    parser.add_argument('--peak-min', type=int, default=PEAK_LOAD_RANGE[0], help='Minimum peak requests per second')
+    parser.add_argument('--peak-max', type=int, default=PEAK_LOAD_RANGE[1], help='Maximum peak requests per second')
+    parser.add_argument('--season-duration', type=int, default=SEASON_DURATION, help='Duration of each season in seconds')
+    parser.add_argument('--peak-duration', type=int, default=PEAK_DURATION, help='Duration of peak window in seconds')
+    parser.add_argument('--peak-offset', type=int, default=PEAK_START_OFFSET, help='Offset (in seconds) before each peak begins')
+    parser.add_argument('--volatility', type=float, default=VOLATILITY_FACTOR, help='Volatility factor (0 for perfectly repeatable traffic)')
+    parser.add_argument('--timeout', type=float, default=REQUEST_TIMEOUT, help='Request timeout in seconds')
+    # Client behavior tuning
+    parser.add_argument('--client-timeout-normal', type=float, default=CONFIG["CLIENT_TIMEOUT_NORMAL"],
+                      help='Per-request timeout during normal windows (seconds)')
+    parser.add_argument('--client-timeout-peak', type=float, default=CONFIG["CLIENT_TIMEOUT_PEAK"],
+                      help='Per-request timeout during peak windows (seconds)')
+    parser.add_argument('--tick-grace', type=float, default=CONFIG["TICK_GRACE"],
+                      help='Extra seconds added to the 1s per-second deadline so slow requests can finish')
+    parser.add_argument('--max-rps', type=int, default=CONFIG["MAX_RPS"],
+                      help='Hard cap for scheduled requests per second (after burst)')
+    parser.set_defaults(test_predictive=CONFIG["TEST_PREDICTIVE"])
+
     return parser.parse_args()
 
 def main():
@@ -902,7 +1148,16 @@ def main():
     # Update global settings based on command-line args
     global NORMAL_LOAD_RANGE, PEAK_LOAD_RANGE, SEASON_DURATION, PEAK_DURATION, PEAK_START_OFFSET, VOLATILITY_FACTOR, REQUEST_TIMEOUT
     NORMAL_LOAD_RANGE = (args.normal_min, args.normal_max)
-    PEAK_LOAD_RANGE = (args.peak_min, args.peak_max)
+    # Optional: auto calculate peak range to target ~80% utilization of 10 pods
+    if args.auto_peak:
+        # target pods/maxPods ~= 10, target utilization ~= 0.8
+        target_rps = int(10 * args.rps_per_pod * 0.8)
+        # center +/- 10%
+        low = max(1, int(target_rps * 0.9))
+        high = max(low + 1, int(target_rps * 1.1))
+        PEAK_LOAD_RANGE = (low, high)
+    else:
+        PEAK_LOAD_RANGE = (args.peak_min, args.peak_max)
     SEASON_DURATION = args.season_duration
     PEAK_DURATION = args.peak_duration
     PEAK_START_OFFSET = args.peak_offset
@@ -927,14 +1182,24 @@ def main():
     logger.info(f"Output directory: {args.output_dir}")
     logger.info(f"Seasonal traffic pattern (single peak per season)")
     logger.info(f"Normal load range: {NORMAL_LOAD_RANGE} req/sec")
-    logger.info(f"Peak load range: {PEAK_LOAD_RANGE} req/sec")
-    logger.info(f"Season duration: {SEASON_DURATION} seconds (5 minutes)")
+    logger.info(f"Peak load range: {PEAK_LOAD_RANGE} req/sec" + (" (auto)" if args.auto_peak else ""))
+    if args.auto_peak:
+        logger.info(f"Auto-peak targeting ~80% of 10 pods with ~{args.rps_per_pod} RPS/pod assumption => target≈{int(10*args.rps_per_pod*0.8)} RPS")
+    logger.info(f"Season duration: {SEASON_DURATION} seconds ({SEASON_DURATION/60:.1f} minutes)")
     logger.info(f"Peak duration: {PEAK_DURATION} seconds")
     logger.info(f"Peak offset: {PEAK_START_OFFSET} seconds into each season")
     logger.info(f"Volatility factor: {VOLATILITY_FACTOR}")
     logger.info(f"Request timeout: {REQUEST_TIMEOUT} seconds")
+    logger.info(f"Client timeouts: normal={args.client_timeout_normal}s, peak={args.client_timeout_peak}s; tick grace={args.tick_grace}s")
+    logger.info(f"Max RPS cap: {args.max_rps}")
     logger.info(f"Max concurrency: {args.max_concurrency}")
     logger.info(f"Endpoint weights: {ENDPOINT_WEIGHTS}")
+    if args.seed is not None:
+        try:
+            np.random.seed(args.seed)
+            logger.info(f"Random seed set to: {args.seed}")
+        except Exception as e:
+            logger.warning(f"Failed to set random seed: {e}")
     logger.info("===========================")
 
     # Start optional Prometheus metrics server
@@ -957,7 +1222,11 @@ def main():
         test_predictive=test_predictive,
         max_concurrency=args.max_concurrency,
         metrics_enabled=metrics_enabled,
-        chaos_error_rate=args.chaos_error_rate
+        chaos_error_rate=args.chaos_error_rate,
+        client_timeout_normal=args.client_timeout_normal,
+        client_timeout_peak=args.client_timeout_peak,
+        tick_grace=args.tick_grace,
+        max_rps=args.max_rps
     )
 
     try:

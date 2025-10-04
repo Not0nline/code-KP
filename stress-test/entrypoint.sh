@@ -7,28 +7,12 @@ if [[ -n "${LOAD_TEST_SOURCE_URL:-}" ]]; then
   curl -fsSL "$LOAD_TEST_SOURCE_URL" -o /app/load_test.py
 fi
 
-PYTHON_CMD=(python /app/load_test.py \
-  --target "$TARGET" \
-  --hpa-url "$HPA_URL" \
-  --combined-url "$COMBINED_URL" \
-  --predictive-url "$PREDICTIVE_URL" \
-  --duration "$DURATION" \
-  --max-concurrency "$MAX_CONCURRENCY" \
-  --metrics-port "$METRICS_PORT" \
-  --normal-min "$NORMAL_MIN" \
-  --normal-max "$NORMAL_MAX" \
-  --peak-min "$PEAK_MIN" \
-  --peak-max "$PEAK_MAX" \
-  --season-duration "$SEASON_DURATION" \
-  --peak-duration "$PEAK_DURATION" \
-  --peak-offset "$PEAK_OFFSET" \
-  --volatility "$VOLATILITY" \
-  --timeout "$TIMEOUT"
-)
+PYTHON_CMD=(python /app/load_test.py)
 
-# Toggle predictive flag
-if [[ "${TEST_PREDICTIVE,,}" == "true" ]]; then
-  PYTHON_CMD+=(--test-predictive)
+if [[ -n "${LOAD_TEST_EXTRA_ARGS:-}" ]]; then
+  # shellcheck disable=SC2206
+  EXTRA_ARGS=( ${LOAD_TEST_EXTRA_ARGS} )
+  PYTHON_CMD+=("${EXTRA_ARGS[@]}")
 fi
 
 exec "${PYTHON_CMD[@]}"

@@ -21,44 +21,11 @@ spec:
         ports:
         - name: metrics
           containerPort: 9105
-        env:
-        - name: TARGET
-          value: "both"
-        - name: DURATION
-          value: "1800"
-        - name: HPA_URL
-          value: "http://product-app-hpa-service.default.svc.cluster.local"
-        - name: COMBINED_URL
-          value: "http://product-app-combined-service.default.svc.cluster.local"
-        - name: PREDICTIVE_URL
-          value: "http://predictive-scaler.default.svc.cluster.local:5000"
-        - name: TEST_PREDICTIVE
-          value: "false"
-        - name: MAX_CONCURRENCY
-          value: "512"
-        - name: METRICS_PORT
-          value: "9105"
-        - name: NORMAL_MIN
-          value: "2"
-        - name: NORMAL_MAX
-          value: "5"
-        - name: PEAK_MIN
-          value: "300"
-        - name: PEAK_MAX
-          value: "400"
-        - name: SEASON_DURATION
-          value: "300"
-        - name: PEAK_DURATION
-          value: "30"
-        - name: PEAK_OFFSET
-          value: "60"
-        - name: VOLATILITY
-          value: "0.1"
-        - name: TIMEOUT
-          value: "60"
-        # Optional: uncomment to always fetch the latest script from your Git raw URL
-        # - name: LOAD_TEST_SOURCE_URL
-        #   value: "https://raw.githubusercontent.com/Not0nline/code-KP/main/stress-test/load_test.py"
+        # Optional environment overrides can be added here if you need to diverge from
+        # the defaults defined in stress-test/load_test.py. Example:
+        # env:
+        # - name: LOAD_TEST_EXTRA_ARGS
+        #   value: "--target hpa"
 ---
 apiVersion: v1
 kind: Service
