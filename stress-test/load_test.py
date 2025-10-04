@@ -47,10 +47,10 @@ CONFIG_SCHEMA = {
     "PEAK_OFFSET": (60, int),
     "VOLATILITY": (0.1, float),
     "TIMEOUT": (60.0, float),
-    "LOAD_INTENSITY_NORMAL_MIN": (3, int),
-    "LOAD_INTENSITY_NORMAL_MAX": (8, int),
-    "LOAD_INTENSITY_PEAK_MIN": (15, int),
-    "LOAD_INTENSITY_PEAK_MAX": (30, int),
+    "LOAD_INTENSITY_NORMAL_MIN": (2, int),
+    "LOAD_INTENSITY_NORMAL_MAX": (5, int),
+    "LOAD_INTENSITY_PEAK_MIN": (6, int),
+    "LOAD_INTENSITY_PEAK_MAX": (12, int),
     "LOAD_DURATION_NORMAL": (1.0, float),
     "LOAD_DURATION_PEAK": (0.5, float),
     "CLIENT_TIMEOUT_NORMAL": (15.0, float),
@@ -120,23 +120,23 @@ BURST_ON_PEAK_MULTIPLIER = CONFIG["BURST_ON_PEAK_MULTIPLIER"]
 
 # Endpoint weights (probability distribution)
 ENDPOINT_WEIGHTS = {
-    "product_list": 0.45,       # 45% of requests to /product/list
+    "product_list": 0.5,        # 50% of requests to /product/list
     "product_create": 0.35,     # 35% of requests to /product/create
-    "load": 0.1,                # 10% to generate load via /load
+    "load": 0.05,               # 5% to generate load via /load
     "health": 0.1               # 10% to /health endpoint
 }
 
 # Heavier distribution during spike windows (more CPU-heavy traffic)
 PEAK_ENDPOINT_WEIGHTS = {
-    "product_list": 0.25,
-    "product_create": 0.20,
-    "load": 0.50,
-    "health": 0.05,
+    "product_list": 0.3,
+    "product_create": 0.3,
+    "load": 0.3,
+    "health": 0.1,
 }
 
-# Intensity ranges for /load endpoint - DRASTICALLY reduced to prevent timeouts
+# Intensity ranges for /load endpoint - tuned down further to prevent timeouts
 # The /load endpoint does intensity*200 iterations, each with 100 random ops
-# intensity=80 = 1.6 MILLION operations = 3-5 seconds response time!
+# intensity=12 now tops out at 240k operations to keep latency manageable
 LOAD_INTENSITY_NORMAL = (
     CONFIG["LOAD_INTENSITY_NORMAL_MIN"],
     CONFIG["LOAD_INTENSITY_NORMAL_MAX"],

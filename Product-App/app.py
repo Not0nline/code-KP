@@ -37,7 +37,7 @@ products = []
 # Track concurrent requests
 concurrent_requests = 0
 # Allow much higher concurrency to prevent client-side 503s during stress tests
-max_concurrent_requests = 200  # Reject if more than this
+max_concurrent_requests = max(1, int(os.environ.get('MAX_CONCURRENT_REQUESTS', '400')))  # Reject if more than this
 request_lock = threading.Lock()
 
 # Ensure counters exist at startup so Prometheus scrapes have stable series even when idle
