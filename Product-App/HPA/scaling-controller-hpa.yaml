@@ -29,11 +29,20 @@ spec:
         - name: SCALING_COOLDOWN
           value: "60"
         - name: SCALING_THRESHOLD
-          value: "0.5"
+          valueFrom:
+            configMapKeyRef:
+              name: product-app-scaling-thresholds
+              key: SCALING_THRESHOLD
         - name: CPU_SCALE_UP_THRESHOLD
-          value: "80"
+          valueFrom:
+            configMapKeyRef:
+              name: product-app-scaling-thresholds
+              key: CPU_SCALE_UP_THRESHOLD
         - name: CPU_SCALE_DOWN_THRESHOLD
-          value: "40"
+          valueFrom:
+            configMapKeyRef:
+              name: product-app-scaling-thresholds
+              key: CPU_SCALE_DOWN_THRESHOLD
         - name: DEBUG_MODE
           value: "true"
         - name: PROMETHEUS_SERVER
