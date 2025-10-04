@@ -1,7 +1,6 @@
 import random
 from flask import Flask, request, jsonify
-from prometheus_flask_exporter import PrometheusMetrics
-from prometheus_client import Counter, Histogram, Gauge
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 import time
 import os
 import logging
@@ -14,10 +13,6 @@ app = Flask(__name__)
 
 # Get app type from environment (hpa or combined)
 app_type = os.environ.get('APP_TYPE', 'product-app')
-
-# Initialize metrics exporter
-metrics = PrometheusMetrics(app)
-metrics.info('app_info', 'Application info', version='1.0', app_type=app_type)
 
 # Custom metrics
 product_creation = Counter('product_creation_total', 'Total number of products created',
@@ -86,8 +81,8 @@ def before_request_timing():
 def after_request_metrics(response):
     global concurrent_requests
     
-    # Don't track concurrency for health/metrics paths
-    if request.path not in ('/metrics', '/health'):
+    # Don't track concurrency or metrics for health/metrics/load paths
+    if request.path not in ('/metrics', '/health', '/load'):
         # Decrement concurrent requests
         with request_lock:
             concurrent_requests = max(0, concurrent_requests - 1)
@@ -253,6 +248,12 @@ def generate_load():
 def health():
     # Quick health check - don't count against concurrent requests
     return jsonify({"status": "healthy"}), 200
+
+@app.route('/metrics', methods=['GET'])
+def metrics():
+    # Expose Prometheus metrics
+    from flask import Response
+    return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
 
 @app.route('/products', methods=['GET'])
 def products_endpoint():

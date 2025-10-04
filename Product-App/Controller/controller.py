@@ -168,10 +168,10 @@ def get_cpu_utilization():
         return 0.0
 
 def get_request_rate():
-    """Get request rate from Prometheus."""
+    """Get per-second request rate from Prometheus."""
     try:
         # Query for request rate
-        query = f'sum(rate(app_http_requests_total{{app="{TARGET_DEPLOYMENT}"}}[1m])) * 60'
+        query = f'sum(rate(app_http_requests_total{{app="{TARGET_DEPLOYMENT}"}}[1m]))'
         
         response = requests.get(f"{PROMETHEUS_SERVER}/api/v1/query", 
                               params={"query": query},

@@ -51,6 +51,7 @@
           "color": {
             "mode": "palette-classic"
           },
+          "unit": "reqps",
           "custom": {
             "axisBorderShow": false,
             "axisCenteredZero": false,
@@ -130,7 +131,7 @@
           },
           "editorMode": "code",
           "expr": "sum(rate(app_http_requests_total{app=\"product-app-hpa\"}[1m]))",
-          "legendFormat": "HPA Request Rate",
+          "legendFormat": "HPA Request Rate (req/s)",
           "range": true,
           "refId": "A"
         },
@@ -140,8 +141,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\"}[2m])) or on() vector(0)",
-          "legendFormat": "Combined Request Rate",
+          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\"}[1m])) or on() vector(0)",
+          "legendFormat": "Combined Request Rate (req/s)",
           "range": true,
           "refId": "B"
         }
@@ -1348,7 +1349,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code=~\"2..\"}[2m])) or on() vector(0)",
+          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code=~\"2..\"}[1m])) or on() vector(0)",
           "legendFormat": "Successful Requests (200)",
           "range": true,
           "refId": "A"
@@ -1359,7 +1360,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code!~\"2..\"}[2m])) or on() vector(0)",
+          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code!~\"2..\"}[1m])) or on() vector(0)",
           "legendFormat": "Error Requests (non-200)",
           "range": true,
           "refId": "B"
@@ -2296,7 +2297,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\"}[2m])) or on() vector(0)",
+          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\"}[1m])) or on() vector(0)",
           "legendFormat": "Actual Load (Combined)",
           "range": true,
           "refId": "A"

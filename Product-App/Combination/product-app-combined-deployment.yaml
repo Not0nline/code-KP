@@ -32,11 +32,11 @@ spec:
           failureThreshold: 3
         resources:
           requests:
-            cpu: "50m"
-            memory: "64Mi"
-          limits:
-            cpu: "200m"
+            cpu: "300m"
             memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "512Mi"
         env:
         - name: APP_TYPE
           value: "product-app-combined"
