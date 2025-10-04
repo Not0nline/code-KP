@@ -36,8 +36,8 @@ products = []
 
 # Track concurrent requests
 concurrent_requests = 0
-# Allow much higher concurrency to prevent client-side 503s during stress tests
-max_concurrent_requests = max(1, int(os.environ.get('MAX_CONCURRENT_REQUESTS', '400')))  # Reject if more than this
+# Tighter concurrency cap so overload conditions surface quickly under stress
+max_concurrent_requests = max(1, int(os.environ.get('MAX_CONCURRENT_REQUESTS', '120')))  # Reject if more than this
 request_lock = threading.Lock()
 
 # Ensure counters exist at startup so Prometheus scrapes have stable series even when idle
@@ -59,8 +59,7 @@ def before_request_timing():
     global concurrent_requests
     
     # Always allow fast paths for health and metrics; don't throttle or count concurrency
-    # Also allow /load to bypass concurrency cap so spikes can fully saturate CPU during tests
-    if request.path in ('/metrics', '/health', '/load'):
+    if request.path in ('/metrics', '/health'):
         request.start_time = time.time()
         return
 
@@ -81,8 +80,8 @@ def before_request_timing():
 def after_request_metrics(response):
     global concurrent_requests
     
-    # Don't track concurrency or metrics for health/metrics/load paths
-    if request.path not in ('/metrics', '/health', '/load'):
+    # Don't track concurrency or metrics for health/metrics paths
+    if request.path not in ('/metrics', '/health'):
         # Decrement concurrent requests
         with request_lock:
             concurrent_requests = max(0, concurrent_requests - 1)

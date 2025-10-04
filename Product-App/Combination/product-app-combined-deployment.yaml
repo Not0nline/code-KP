@@ -41,4 +41,4 @@ spec:
         - name: APP_TYPE
           value: "product-app-combined"
         - name: MAX_CONCURRENT_REQUESTS
-          value: "600"
+          value: "140"
