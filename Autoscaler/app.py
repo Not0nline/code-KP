@@ -30,6 +30,14 @@ except Exception:
     K8S_AVAILABLE = False
 warnings.filterwarnings('ignore')
 
+
+def _env_float(name, default):
+    """Safely read a float value from the environment."""
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
 # Flask app initialization
 app = Flask(__name__)
 metrics = PrometheusMetrics(app)  # Exposes /metrics endpoint
@@ -108,7 +116,7 @@ SCALER_Y_FILE = os.path.join(DATA_DIR, "scaler_y.pkl")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 MIN_DATA_POINTS_FOR_GRU = 2000  # Based on your hyperparameters
 PREDICTION_WINDOW = 24  # Based on your hyperparameters
-SCALING_THRESHOLD = 0.7  # CPU threshold for scaling decision
+SCALING_THRESHOLD = _env_float('SCALING_THRESHOLD', 0.7)  # CPU threshold for scaling decision
 SCALING_COOLDOWN = 60  # Reduced to 1 minute for faster scale down
 
 # Paper-based Two-Coroutine Configuration
@@ -129,9 +137,9 @@ config = {
     "target_namespace": os.getenv('TARGET_NAMESPACE', 'default'),
     "cost_optimization": {
         "enabled": True,
-        "target_cpu_utilization": 100,  # Target higher CPU for efficiency (0-100 scale)
-        "scale_up_threshold": 95,  # Scale up only at very high CPU (0-100 scale)
-        "scale_down_threshold": 50,  # Scale down at higher threshold (0-100 scale)  
+    "target_cpu_utilization": _env_float('TARGET_CPU_UTILIZATION', 100),
+    "scale_up_threshold": _env_float('CPU_SCALE_UP_THRESHOLD', 95),
+    "scale_down_threshold": _env_float('CPU_SCALE_DOWN_THRESHOLD', 50),  
         "min_replicas": 1,
         "max_replicas": 10,
         "aggressive_scaling": False,  # More conservative scaling
@@ -150,9 +158,9 @@ config = {
     },
     "models": {
         "holt_winters": {
-            "slen": 30,  # 30 data points per season (300s / 10s collection interval) 
-            "look_forward": 6,   # Predict 1 minute ahead (6 * 10s)
-            "look_backward": 90, # Look back 15 minutes (3 complete seasons)
+            "slen": 30,  # 30 data points per season (30 minutes @ 60s per data point)
+            "look_forward": 6,   # Predict 6 data points ahead; with 60s points this is 6 minutes
+            "look_backward": 90, # Look back 90 data points (~90 minutes = 3 seasons @ 30 min/season)
             "alpha": 0.3,        # Reduced for more stable level smoothing
             "beta": 0.1,         # Reduced for stable trend
             "gamma": 0.9,        # High seasonal smoothing for strong patterns
@@ -378,7 +386,8 @@ def main_coroutine():
                     })
             
             # Sleep until next prediction interval
-            time.sleep(PREDICTION_INTERVAL)
+            # Sleep for the collection interval so each data point is spaced by 60s
+            time.sleep(int(config.get('collection_interval', PREDICTION_INTERVAL)))
             
         except Exception as e:
             logger.error(f"❌ Main coroutine error: {e}")

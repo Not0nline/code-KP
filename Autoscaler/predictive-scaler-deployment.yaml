@@ -29,6 +29,9 @@ spec:
         ports:
         - name: http
           containerPort: 5000
+        envFrom:
+        - configMapRef:
+            name: product-app-scaling-thresholds
         env:
         # Force single Gunicorn worker to keep Prometheus client single-process
         - name: GUNICORN_WORKERS
