@@ -33,6 +33,8 @@ MAX_REPLICAS = int(os.getenv("MAX_REPLICAS", "10"))
 PROMETHEUS_SERVER = os.getenv("PROMETHEUS_SERVER", "http://prometheus:9090")
 TARGET_CPU_UTILIZATION = float(os.getenv("TARGET_CPU_UTILIZATION", "0.7"))
 TARGET_REQUESTS_PER_REPLICA = int(os.getenv("TARGET_REQUESTS_PER_REPLICA", "100"))
+PREDICTIVE_ENDPOINT = os.getenv("PREDICTIVE_ENDPOINT", "/predict_combined")
+PREDICTIVE_TARGET_DEPLOYMENT = os.getenv("PREDICTIVE_TARGET_DEPLOYMENT", TARGET_DEPLOYMENT)
 
 # Initialize Kubernetes client
 try:
@@ -61,9 +63,20 @@ def get_current_replicas():
 def get_scaling_recommendation():
     """Get scaling recommendation from predictive scaler."""
     try:
-        response = requests.get(f"{PREDICTIVE_SCALER_SERVICE}/predict_combined", timeout=10)
+        predictive_url = f"{PREDICTIVE_SCALER_SERVICE.rstrip('/')}{PREDICTIVE_ENDPOINT}"
+        response = requests.get(predictive_url, timeout=10)
         if response.status_code == 200:
             data = response.json()
+            reported_target = data.get("target_deployment")
+            if reported_target and reported_target != PREDICTIVE_TARGET_DEPLOYMENT:
+                logger.warning(
+                    "Ignoring predictive recommendation for deployment '%s'; controller targets '%s'",
+                    reported_target,
+                    PREDICTIVE_TARGET_DEPLOYMENT,
+                )
+                return None
+            if not reported_target:
+                logger.debug("Predictive scaler response missing target_deployment; assuming compatibility")
             logger.info(f"Received prediction: {data}")
             return data
         else:
