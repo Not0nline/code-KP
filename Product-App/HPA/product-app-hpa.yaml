@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: product-app-hpa
 spec:
-  replicas: 2
+  replicas: 3  # Match combined starting replicas
   selector:
     matchLabels:
       app: product-app-hpa

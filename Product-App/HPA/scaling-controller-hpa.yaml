@@ -25,9 +25,9 @@ spec:
         - name: TARGET_NAMESPACE
           value: "default"
         - name: POLL_INTERVAL
-          value: "30"  # Keep slower to let built-in HPA lead
+          value: "15"  # Match combined controller
         - name: SCALING_COOLDOWN
-          value: "60"
+          value: "30"  # Match combined controller
         - name: SCALING_THRESHOLD
           valueFrom:
             configMapKeyRef:
