@@ -41,4 +41,4 @@ spec:
         - name: APP_TYPE
           value: "product-app-hpa"
         - name: MAX_CONCURRENT_REQUESTS
-          value: "90"
+          value: "140"
