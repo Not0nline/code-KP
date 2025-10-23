@@ -265,6 +265,21 @@ class TestOrchestrator:
         functional_df = df[df['endpoint_type'] != 'health']
         total_functional = len(functional_df)
         
+        # DEBUG: Show CSV columns and sample data
+        logger.info(f"{service_name} CSV Columns: {df.columns.tolist()}")
+        logger.info(f"{service_name} Sample status codes (first 10): {df['status_code'].head(10).tolist()}")
+        logger.info(f"{service_name} Status code dtype: {df['status_code'].dtype}")
+        
+        # DEBUG: Show status code distribution
+        status_counts = functional_df['status_code'].value_counts().to_dict()
+        logger.info(f"{service_name} Status Code Distribution: {status_counts}")
+        
+        # Convert status_code to int if it's a string
+        if df['status_code'].dtype == 'object':
+            logger.warning(f"{service_name}: Converting status_code from string to int")
+            functional_df = functional_df.copy()
+            functional_df['status_code'] = pd.to_numeric(functional_df['status_code'], errors='coerce').fillna(-1).astype(int)
+        
         # Success/Error analysis
         successful = functional_df['status_code'].between(200, 399).sum()
         errors = total_functional - successful
