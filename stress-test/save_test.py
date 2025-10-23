@@ -253,8 +253,24 @@ class TestOrchestrator:
         # Filter out warmup period if not skipping
         if not skip_warmup and warmup_seconds > 0:
             original_count = len(df)
-            df = df[df['elapsed_seconds'] >= warmup_seconds].copy()
-            logger.info(f"{service_name}: Filtered warmup period, {original_count} -> {len(df)} requests")
+            warmup_filtered = False
+
+            if 'elapsed_seconds' not in df.columns:
+                logger.warning(f"{service_name}: elapsed_seconds column missing; skipping warmup filter")
+            else:
+                max_elapsed = df['elapsed_seconds'].max()
+                if warmup_seconds >= max_elapsed:
+                    logger.warning(
+                        f"{service_name}: Warmup period ({warmup_seconds}s) >= observed duration ({max_elapsed:.1f}s); "
+                        "skipping warmup filter"
+                    )
+                else:
+                    df = df[df['elapsed_seconds'] >= warmup_seconds].copy()
+                    warmup_filtered = True
+                    logger.info(f"{service_name}: Filtered warmup period, {original_count} -> {len(df)} requests")
+
+            if not warmup_filtered:
+                logger.info(f"{service_name}: Warmup filter not applied; retaining {original_count} requests")
         
         if df.empty:
             logger.warning(f"{service_name}: No data after warmup filtering!")
@@ -453,6 +469,7 @@ class TestOrchestrator:
             return
         
         # Collect metrics across iterations
+        valid_iterations = []
         hpa_success_rates = []
         combined_success_rates = []
         hpa_error_rates = []
@@ -463,19 +480,31 @@ class TestOrchestrator:
         error_rate_reductions = []
         winners = []
         
-        for result in self.iteration_results:
-            if 'hpa' in result and 'combined' in result:
-                hpa_success_rates.append(result['hpa'].get('success_rate_percent', 0))
-                combined_success_rates.append(result['combined'].get('success_rate_percent', 0))
-                hpa_error_rates.append(result['hpa'].get('error_rate_percent', 0))
-                combined_error_rates.append(result['combined'].get('error_rate_percent', 0))
-                hpa_p95_times.append(result['hpa'].get('response_time_ms', {}).get('p95', 0))
-                combined_p95_times.append(result['combined'].get('response_time_ms', {}).get('p95', 0))
-                
+        for index, result in enumerate(self.iteration_results, start=1):
+            hpa_data = result.get('hpa') or {}
+            combined_data = result.get('combined') or {}
+
+            if hpa_data and combined_data:
+                valid_iterations.append(index)
+                hpa_success_rates.append(hpa_data.get('success_rate_percent', 0))
+                combined_success_rates.append(combined_data.get('success_rate_percent', 0))
+                hpa_error_rates.append(hpa_data.get('error_rate_percent', 0))
+                combined_error_rates.append(combined_data.get('error_rate_percent', 0))
+                hpa_p95_times.append(hpa_data.get('response_time_ms', {}).get('p95', 0))
+                combined_p95_times.append(combined_data.get('response_time_ms', {}).get('p95', 0))
+
                 if 'comparison' in result:
                     success_rate_diffs.append(result['comparison'].get('success_rate_diff', 0))
                     error_rate_reductions.append(result['comparison'].get('error_rate_reduction_percent', 0))
                     winners.append(result['comparison'].get('winner', 'Unknown'))
+            else:
+                logger.warning(f"Iteration {index}: Missing analyzable data; excluded from aggregate summary")
+
+        if not valid_iterations:
+            logger.warning("No iterations produced complete datasets; skipping summary aggregation")
+            return
+        
+        analyzed_iterations = len(valid_iterations)
         
         # Calculate aggregate statistics
         summary = {
@@ -485,6 +514,7 @@ class TestOrchestrator:
                 "warmup_duration_seconds": self.warmup_duration,
                 "data_collection_duration_seconds": self.data_collection_duration,
                 "skip_warmup": self.skip_warmup,
+                "iterations_analyzed": analyzed_iterations,
             },
             "hpa_aggregate": {
                 "success_rate": {
@@ -659,7 +689,8 @@ class TestOrchestrator:
             
             f.write(f"Winner Distribution:\n")
             for winner, count in summary['comparison_aggregate']['winner_distribution'].items():
-                f.write(f"  {winner}: {count}/{self.num_iterations} ({count/self.num_iterations*100:.1f}%)\n")
+                percentage = (count / analyzed_iterations * 100) if analyzed_iterations > 0 else 0
+                f.write(f"  {winner}: {count}/{analyzed_iterations} ({percentage:.1f}%)\n")
             
             f.write(f"\nOverall Winner: {summary['comparison_aggregate']['overall_winner']}\n\n")
             
@@ -697,8 +728,8 @@ class TestOrchestrator:
                 if "model_selection_frequency" in summary:
                     f.write("Model Selection Frequency:\n")
                     for model, count in summary["model_selection_frequency"].items():
-                        percentage = (count / self.num_iterations) * 100
-                        f.write(f"  {model}: {count}/{self.num_iterations} ({percentage:.1f}%)\n")
+                        percentage = (count / analyzed_iterations * 100) if analyzed_iterations > 0 else 0
+                        f.write(f"  {model}: {count}/{analyzed_iterations} ({percentage:.1f}%)\n")
                     f.write("\n")
                 
                 if "best_model" in summary:
@@ -711,7 +742,7 @@ class TestOrchestrator:
         # Generate CSV for easy analysis
         csv_path = os.path.join(self.output_dir, "FINAL_SUMMARY.csv")
         summary_df = pd.DataFrame({
-            'iteration': range(1, len(self.iteration_results) + 1),
+            'iteration': valid_iterations,
             'hpa_success_rate': hpa_success_rates,
             'combined_success_rate': combined_success_rates,
             'hpa_error_rate': hpa_error_rates,
@@ -740,7 +771,9 @@ class TestOrchestrator:
                     "mse_trend": perf['mse_trend'],
                     "iterations_measured": perf['iterations_measured'],
                     "selection_count": summary.get("model_selection_frequency", {}).get(model_name, 0),
-                    "selection_percentage": (summary.get("model_selection_frequency", {}).get(model_name, 0) / self.num_iterations) * 100,
+                    "selection_percentage": (
+                        summary.get("model_selection_frequency", {}).get(model_name, 0) / analyzed_iterations * 100
+                    ) if analyzed_iterations > 0 else 0,
                 })
             
             model_df = pd.DataFrame(model_csv_data)
