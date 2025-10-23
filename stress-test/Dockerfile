@@ -12,7 +12,7 @@ WORKDIR /app
 
 # Install dependencies
 COPY requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt flask
 
 # Copy the load testing code
 COPY load_test.py ./load_test.py

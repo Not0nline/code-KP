@@ -27,6 +27,17 @@ except Exception as import_error:
     PromGauge = None
     PROM_IMPORT_ERROR = import_error
 
+try:
+    from flask import Flask, request, jsonify
+    FLASK_AVAILABLE = True
+    FLASK_IMPORT_ERROR = None
+except Exception as import_error:
+    FLASK_AVAILABLE = False
+    Flask = None
+    request = None
+    jsonify = None
+    FLASK_IMPORT_ERROR = import_error
+
 def _coerce_bool(value: str) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
@@ -40,6 +51,8 @@ CONFIG_SCHEMA = {
     "TEST_PREDICTIVE": (False, _coerce_bool),
     "MAX_CONCURRENCY": (96, int),
     "METRICS_PORT": (9105, int),
+    "CONTROL_API_ENABLED": (False, _coerce_bool),
+    "CONTROL_API_PORT": (8080, int),
     "NORMAL_MIN": (2, int),
     "NORMAL_MAX": (4, int),
     "PEAK_MIN": (35, int),  
@@ -1285,10 +1298,215 @@ def parse_arguments():
 
     return parser.parse_args()
 
+# Global state for orchestrated test runs
+orchestrator_state = {
+    "running": False,
+    "current_iteration": 0,
+    "total_iterations": 0,
+    "results": [],
+    "output_dir": None,
+    "start_time": None,
+}
+
+def create_control_api():
+    """Create Flask API for controlling orchestrated test runs."""
+    if not FLASK_AVAILABLE:
+        logger.error("Flask not available; cannot create control API. Install 'flask' to enable.")
+        return None
+    
+    app = Flask(__name__)
+    
+    @app.route('/health', methods=['GET'])
+    def health():
+        """Health check endpoint."""
+        return jsonify({
+            "status": "healthy",
+            "orchestrator_running": orchestrator_state["running"],
+            "current_iteration": orchestrator_state["current_iteration"],
+            "total_iterations": orchestrator_state["total_iterations"],
+        })
+    
+    @app.route('/start', methods=['POST'])
+    def start_test():
+        """Start an orchestrated test run."""
+        if orchestrator_state["running"]:
+            return jsonify({
+                "error": "Test already running",
+                "current_iteration": orchestrator_state["current_iteration"],
+                "total_iterations": orchestrator_state["total_iterations"],
+            }), 409
+        
+        try:
+            data = request.get_json() or {}
+            iterations = int(data.get('iterations', 1))
+            duration = int(data.get('duration', 1800))
+            warmup = int(data.get('warmup', 300))
+            cooldown = int(data.get('cooldown', 60))
+            skip_warmup = bool(data.get('skip_warmup', False))
+            output_dir = data.get('output_dir', './multi_run_results')
+            max_concurrency = int(data.get('max_concurrency', CONFIG["MAX_CONCURRENCY"]))
+            
+            # Start orchestrator in background thread
+            def run_orchestrator():
+                try:
+                    orchestrator_state["running"] = True
+                    orchestrator_state["total_iterations"] = iterations
+                    orchestrator_state["current_iteration"] = 0
+                    orchestrator_state["results"] = []
+                    orchestrator_state["start_time"] = datetime.now()
+                    
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    batch_dir = os.path.join(output_dir, f"batch_{timestamp}")
+                    os.makedirs(batch_dir, exist_ok=True)
+                    orchestrator_state["output_dir"] = batch_dir
+                    
+                    logger.info("="*80)
+                    logger.info("ORCHESTRATED TEST RUN STARTING (via API)")
+                    logger.info("="*80)
+                    logger.info(f"Iterations: {iterations}")
+                    logger.info(f"Duration per test: {duration}s")
+                    logger.info(f"Warmup: {warmup}s")
+                    logger.info(f"Cooldown: {cooldown}s")
+                    logger.info(f"Output: {batch_dir}")
+                    logger.info("="*80)
+                    
+                    for i in range(1, iterations + 1):
+                        orchestrator_state["current_iteration"] = i
+                        logger.info(f"\n{'='*80}")
+                        logger.info(f"ITERATION {i}/{iterations}")
+                        logger.info(f"{'='*80}")
+                        
+                        iteration_dir = os.path.join(batch_dir, f"iteration_{i:02d}")
+                        os.makedirs(iteration_dir, exist_ok=True)
+                        
+                        # Run single test
+                        tester = LoadTester(
+                            hpa_url=CONFIG["HPA_URL"],
+                            combined_url=CONFIG["COMBINED_URL"],
+                            predictive_url=CONFIG["PREDICTIVE_URL"],
+                            duration=duration,
+                            output_dir=iteration_dir,
+                            test_hpa=True,
+                            test_combined=True,
+                            test_predictive=False,
+                            max_concurrency=max_concurrency,
+                            metrics_enabled=False,
+                            metrics_port=0,
+                        )
+                        
+                        result = tester.run_test()
+                        orchestrator_state["results"].append({
+                            "iteration": i,
+                            "result": result,
+                        })
+                        
+                        # Cooldown between iterations
+                        if i < iterations:
+                            logger.info(f"Cooldown: {cooldown}s")
+                            time.sleep(cooldown)
+                    
+                    logger.info("\n" + "="*80)
+                    logger.info("ALL ITERATIONS COMPLETED")
+                    logger.info("="*80)
+                    
+                    # Save summary
+                    summary_path = os.path.join(batch_dir, "api_summary.json")
+                    with open(summary_path, 'w') as f:
+                        json.dump({
+                            "iterations": iterations,
+                            "duration": duration,
+                            "warmup": warmup,
+                            "start_time": orchestrator_state["start_time"].isoformat(),
+                            "end_time": datetime.now().isoformat(),
+                            "results": orchestrator_state["results"],
+                        }, f, indent=2)
+                    logger.info(f"Summary saved to {summary_path}")
+                    
+                except Exception as e:
+                    logger.error(f"Orchestrator failed: {e}")
+                    logger.exception(e)
+                finally:
+                    orchestrator_state["running"] = False
+                    orchestrator_state["current_iteration"] = 0
+            
+            thread = threading.Thread(target=run_orchestrator, daemon=True)
+            thread.start()
+            
+            return jsonify({
+                "message": "Test started",
+                "iterations": iterations,
+                "duration": duration,
+                "output_dir": output_dir,
+            }), 202
+            
+        except Exception as e:
+            logger.error(f"Failed to start test: {e}")
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route('/status', methods=['GET'])
+    def get_status():
+        """Get current orchestrator status."""
+        return jsonify({
+            "running": orchestrator_state["running"],
+            "current_iteration": orchestrator_state["current_iteration"],
+            "total_iterations": orchestrator_state["total_iterations"],
+            "output_dir": orchestrator_state["output_dir"],
+            "start_time": orchestrator_state["start_time"].isoformat() if orchestrator_state["start_time"] else None,
+            "results_count": len(orchestrator_state["results"]),
+        })
+    
+    @app.route('/results', methods=['GET'])
+    def get_results():
+        """Get results from completed iterations."""
+        return jsonify({
+            "output_dir": orchestrator_state["output_dir"],
+            "results": orchestrator_state["results"],
+        })
+    
+    return app
+
 def main():
     """Main function – parse arguments and start the load test."""
     args = parse_arguments()
     
+    # Check if control API should be enabled
+    control_api_enabled = CONFIG["CONTROL_API_ENABLED"]
+    control_api_port = CONFIG["CONTROL_API_PORT"]
+    
+    if control_api_enabled:
+        if not FLASK_AVAILABLE:
+            logger.error("Control API requested but Flask not available. Install 'flask' to enable.")
+            logger.error(f"Import error: {FLASK_IMPORT_ERROR}")
+            sys.exit(1)
+        
+        logger.info("="*80)
+        logger.info("CONTROL API MODE")
+        logger.info("="*80)
+        logger.info(f"Starting HTTP control API on port {control_api_port}")
+        logger.info("Available endpoints:")
+        logger.info("  GET  /health  - Health check")
+        logger.info("  POST /start   - Start orchestrated test run")
+        logger.info("  GET  /status  - Get current status")
+        logger.info("  GET  /results - Get completed results")
+        logger.info("")
+        logger.info("Example: curl -X POST http://localhost:8080/start -H 'Content-Type: application/json' \\")
+        logger.info("         -d '{\"iterations\": 1, \"duration\": 300, \"max_concurrency\": 24}'")
+        logger.info("="*80)
+        
+        # Start Prometheus metrics if enabled
+        if args.metrics_port > 0 and PROM_AVAILABLE:
+            prom_start_http_server(args.metrics_port)
+            logger.info(f"Prometheus metrics available on port {args.metrics_port}")
+        
+        app = create_control_api()
+        if app:
+            app.run(host='0.0.0.0', port=control_api_port, debug=False, threaded=True)
+        else:
+            logger.error("Failed to create control API")
+            sys.exit(1)
+        return
+    
+    # Original single-test mode
     # Update global settings based on command-line args
     global NORMAL_LOAD_RANGE, PEAK_LOAD_RANGE, SEASON_DURATION, PEAK_DURATION, PEAK_START_OFFSET, VOLATILITY_FACTOR, REQUEST_TIMEOUT
     NORMAL_LOAD_RANGE = (args.normal_min, args.normal_max)
