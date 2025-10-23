@@ -21,11 +21,22 @@ spec:
         ports:
         - name: metrics
           containerPort: 9105
-        # Optional environment overrides can be added here if you need to diverge from
-        # the defaults defined in stress-test/load_test.py. Example:
-        # env:
-        # - name: LOAD_TEST_EXTRA_ARGS
-        #   value: "--target hpa"
+        - name: control-api
+          containerPort: 8080
+        env:
+        - name: CONTROL_API_ENABLED
+          value: "true"
+        - name: CONTROL_API_PORT
+          value: "8080"
+        - name: MAX_CONCURRENCY
+          value: "24"
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 2
+            memory: 2Gi
 ---
 apiVersion: v1
 kind: Service
@@ -40,6 +51,9 @@ spec:
   - name: metrics
     port: 9105
     targetPort: metrics
+  - name: control-api
+    port: 8080
+    targetPort: control-api
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
