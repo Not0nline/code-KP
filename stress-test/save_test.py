@@ -118,6 +118,67 @@ class TestOrchestrator:
             logger.error(f"Unexpected error: {e}")
             return None
     
+    def fetch_autoscaler_metrics(self, predictive_url="http://predictive-scaler.default.svc.cluster.local:5000"):
+        """
+        Fetch model performance metrics from the predictive autoscaler.
+        
+        Returns dict with:
+        - mse_per_model: {model_name: mse_data}
+        - model_comparison: comparison data
+        - selected_model: which model was chosen
+        """
+        import requests
+        metrics = {}
+        
+        try:
+            # Get MSE status for each model
+            mse_response = requests.get(f"{predictive_url}/debug/mse_status", timeout=10)
+            if mse_response.status_code == 200:
+                mse_data = mse_response.json()
+                metrics['mse_per_model'] = {}
+                
+                for model_name in ['gru', 'holt_winters']:
+                    model_key = f"{model_name}_mse"
+                    if model_key in mse_data:
+                        metrics['mse_per_model'][model_name] = {
+                            'current_mse': mse_data[model_key].get('current', 0),
+                            'min_mse': mse_data[model_key].get('min', 0),
+                            'max_mse': mse_data[model_key].get('max', 0),
+                            'avg_mse': mse_data[model_key].get('avg', 0),
+                            'samples': mse_data[model_key].get('samples', 0),
+                        }
+            
+            # Get model comparison data (includes selection and prediction times)
+            comparison_response = requests.get(f"{predictive_url}/debug/model_comparison", timeout=10)
+            if comparison_response.status_code == 200:
+                comp_data = comparison_response.json()
+                metrics['model_comparison'] = comp_data
+                metrics['selected_model'] = comp_data.get('selected_model', 'unknown')
+                
+                # Extract prediction times from model_comparison
+                if 'models' in comp_data:
+                    metrics['prediction_times'] = {}
+                    for model_name, model_data in comp_data['models'].items():
+                        if 'prediction_time_ms' in model_data:
+                            metrics['prediction_times'][model_name] = model_data['prediction_time_ms']
+            
+            # Get general status
+            status_response = requests.get(f"{predictive_url}/status", timeout=10)
+            if status_response.status_code == 200:
+                status_data = status_response.json()
+                metrics['autoscaler_status'] = {
+                    'is_trained': status_data.get('is_trained', False),
+                    'data_points': status_data.get('data_points', 0),
+                    'collection_complete': status_data.get('data_collection_complete', False),
+                }
+            
+            logger.info(f"Fetched autoscaler metrics: {len(metrics)} categories")
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch autoscaler metrics: {e}")
+            return {}
+    
     def _extract_iteration_results(self, iteration_dir, iteration_num, start_time, end_time):
         """Extract and analyze results from a completed test iteration."""
         logger.info(f"Extracting results for iteration {iteration_num}...")
@@ -161,6 +222,21 @@ class TestOrchestrator:
         # Calculate comparative metrics
         if results.get("hpa") and results.get("combined"):
             results["comparison"] = self._calculate_comparison_metrics(results["hpa"], results["combined"])
+        
+        # Fetch autoscaler model metrics
+        autoscaler_metrics = self.fetch_autoscaler_metrics()
+        if autoscaler_metrics:
+            results['autoscaler_metrics'] = autoscaler_metrics
+            
+            # Log model MSE values
+            if 'mse_per_model' in autoscaler_metrics:
+                logger.info("Model MSE Values:")
+                for model, mse_data in autoscaler_metrics['mse_per_model'].items():
+                    logger.info(f"  {model}: {mse_data['current_mse']:.4f} (avg: {mse_data['avg_mse']:.4f})")
+            
+            # Log selected model
+            if 'selected_model' in autoscaler_metrics:
+                logger.info(f"Selected Model: {autoscaler_metrics['selected_model']}")
         
         # Save iteration summary
         summary_path = os.path.join(iteration_dir, "iteration_summary.json")
@@ -462,6 +538,61 @@ class TestOrchestrator:
             "detailed_iterations": self.iteration_results,
         }
         
+        # Aggregate autoscaler model metrics
+        model_metrics = [r.get("autoscaler_metrics", {}) for r in self.iteration_results if r.get("autoscaler_metrics")]
+        if model_metrics:
+            summary["model_performance"] = {}
+            
+            # Track MSE history per model
+            model_mse_history = {}
+            model_selection_count = {}
+            
+            for iteration_metrics in model_metrics:
+                # Aggregate MSE per model
+                if 'mse_per_model' in iteration_metrics:
+                    for model_name, mse_data in iteration_metrics['mse_per_model'].items():
+                        if model_name not in model_mse_history:
+                            model_mse_history[model_name] = {
+                                'mse_values': [],
+                                'min_mse': [],
+                                'max_mse': [],
+                                'avg_mse': [],
+                                'samples': []
+                            }
+                        model_mse_history[model_name]['mse_values'].append(mse_data['current_mse'])
+                        model_mse_history[model_name]['min_mse'].append(mse_data['min_mse'])
+                        model_mse_history[model_name]['max_mse'].append(mse_data['max_mse'])
+                        model_mse_history[model_name]['avg_mse'].append(mse_data['avg_mse'])
+                        model_mse_history[model_name]['samples'].append(mse_data['samples'])
+                
+                # Count model selections
+                if 'selected_model' in iteration_metrics:
+                    selected = iteration_metrics['selected_model']
+                    model_selection_count[selected] = model_selection_count.get(selected, 0) + 1
+            
+            # Compute aggregate statistics
+            for model_name, history in model_mse_history.items():
+                summary["model_performance"][model_name] = {
+                    'overall_avg_mse': float(np.mean(history['mse_values'])),
+                    'overall_min_mse': float(np.min(history['min_mse'])),
+                    'overall_max_mse': float(np.max(history['max_mse'])),
+                    'mse_std_dev': float(np.std(history['mse_values'])),
+                    'mse_trend': 'improving' if len(history['mse_values']) > 1 and history['mse_values'][-1] < history['mse_values'][0] else 'stable',
+                    'iterations_measured': len(history['mse_values']),
+                }
+            
+            # Add selection frequency
+            summary["model_selection_frequency"] = model_selection_count
+            
+            # Determine best model
+            if model_mse_history:
+                best_model = min(model_mse_history.items(), 
+                                key=lambda x: np.mean(x[1]['mse_values']))
+                summary["best_model"] = {
+                    'name': best_model[0],
+                    'avg_mse': float(np.mean(best_model[1]['mse_values'])),
+                }
+        
         # Save JSON summary
         summary_path = os.path.join(self.output_dir, "FINAL_SUMMARY.json")
         with open(summary_path, 'w') as f:
@@ -532,6 +663,33 @@ class TestOrchestrator:
                 if 'comparison' in result:
                     f.write(f"  Winner: {result['comparison'].get('winner', 'Unknown')}\n")
                 f.write("\n")
+            
+            # Add model performance section
+            if "model_performance" in summary:
+                f.write("="*80 + "\n")
+                f.write("MODEL PERFORMANCE SUMMARY\n")
+                f.write("="*80 + "\n\n")
+                
+                for model_name, perf in summary["model_performance"].items():
+                    f.write(f"{model_name.upper()}:\n")
+                    f.write(f"  Overall Avg MSE: {perf['overall_avg_mse']:.6f}\n")
+                    f.write(f"  Overall Min MSE: {perf['overall_min_mse']:.6f}\n")
+                    f.write(f"  Overall Max MSE: {perf['overall_max_mse']:.6f}\n")
+                    f.write(f"  MSE Std Dev: {perf['mse_std_dev']:.6f}\n")
+                    f.write(f"  Trend: {perf['mse_trend']}\n")
+                    f.write(f"  Iterations Measured: {perf['iterations_measured']}\n\n")
+                
+                if "model_selection_frequency" in summary:
+                    f.write("Model Selection Frequency:\n")
+                    for model, count in summary["model_selection_frequency"].items():
+                        percentage = (count / self.num_iterations) * 100
+                        f.write(f"  {model}: {count}/{self.num_iterations} ({percentage:.1f}%)\n")
+                    f.write("\n")
+                
+                if "best_model" in summary:
+                    f.write(f"Best Performing Model:\n")
+                    f.write(f"  Name: {summary['best_model']['name']}\n")
+                    f.write(f"  Avg MSE: {summary['best_model']['avg_mse']:.6f}\n\n")
         
         logger.info(f"Saved text report to {report_path}")
         
@@ -551,6 +709,28 @@ class TestOrchestrator:
         })
         summary_df.to_csv(csv_path, index=False)
         logger.info(f"Saved CSV summary to {csv_path}")
+        
+        # Save model performance to separate CSV
+        if "model_performance" in summary:
+            model_csv_path = os.path.join(self.output_dir, "MODEL_PERFORMANCE.csv")
+            model_csv_data = []
+            
+            for model_name, perf in summary["model_performance"].items():
+                model_csv_data.append({
+                    "model_name": model_name,
+                    "overall_avg_mse": perf['overall_avg_mse'],
+                    "overall_min_mse": perf['overall_min_mse'],
+                    "overall_max_mse": perf['overall_max_mse'],
+                    "mse_std_dev": perf['mse_std_dev'],
+                    "mse_trend": perf['mse_trend'],
+                    "iterations_measured": perf['iterations_measured'],
+                    "selection_count": summary.get("model_selection_frequency", {}).get(model_name, 0),
+                    "selection_percentage": (summary.get("model_selection_frequency", {}).get(model_name, 0) / self.num_iterations) * 100,
+                })
+            
+            model_df = pd.DataFrame(model_csv_data)
+            model_df.to_csv(model_csv_path, index=False)
+            logger.info(f"Saved model performance CSV to {model_csv_path}")
         
         # Print summary to console
         logger.info("\n" + "="*80)
