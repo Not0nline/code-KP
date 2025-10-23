@@ -296,6 +296,13 @@ class TestOrchestrator:
             functional_df = functional_df.copy()
             functional_df['status_code'] = pd.to_numeric(functional_df['status_code'], errors='coerce').fillna(-1).astype(int)
         
+        # Surface most common error causes to simplify diagnosis when status codes fail
+        if 'error' in functional_df.columns:
+            error_series = functional_df['error'].dropna().astype(str)
+            if not error_series.empty:
+                top_errors = error_series.value_counts().head(3).to_dict()
+                logger.info(f"{service_name} Top Error Messages: {top_errors}")
+
         # Success/Error analysis
         successful = functional_df['status_code'].between(200, 399).sum()
         errors = total_functional - successful
