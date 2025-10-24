@@ -24,7 +24,7 @@ spec:
       containers:
       - name: predictive-scaler
         # Make sure image includes the kubernetes client library!
-        image: 4dri41/predictive-scaler:latest # Use your actual image
+        image: 4dri4l/predictive-scaler:latest # Use your actual image
         imagePullPolicy: Always
         ports:
         - name: http
