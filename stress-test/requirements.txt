@@ -2,3 +2,4 @@ requests
 numpy
 pandas
 prometheus-client
+kubernetes

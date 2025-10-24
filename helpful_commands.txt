@@ -99,3 +99,26 @@ curl -s http://localhost:5000/status | jq '.data_points, .mse_stats.best_model, 
 pkill -f "kubectl port-forward.*predictive-scaler"
 
 ===============================================
+
+buat save test:
+
+kubectl port-forward svc/load-tester 8080:8080
+
+curl -X POST http://localhost:8080/start -H "Content-Type: application/json" -d '{
+  "iterations": 5,
+  "duration": 1800,
+  "scenario": "low"
+}'
+
+curl -X POST http://localhost:8080/start -H "Content-Type: application/json" -d '{
+  "iterations": 3,
+  "duration": 1800,
+  "scenario": "full",
+  "max_concurrency": 48
+}'
+
+kubectl logs -f -l app=load-tester
+
+curl http://localhost:8080/status
+
+curl http://localhost:8080/results

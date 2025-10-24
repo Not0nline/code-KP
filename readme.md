@@ -205,7 +205,7 @@ Choose **ONE** of the following options:
 # Deploy Product App with HPA
 kubectl apply -f Product-App/HPA/product-app-hpa-service.yaml
 kubectl apply -f Product-App/HPA/product-app-hpa.yaml
-kubectl apply -f Product-App/HPA/product-app-hpa-hpa.yaml
+kubectl apply -f Product-App/HPA/product-app-hpa.yaml
 
 # Deploy ServiceMonitor (ensure it has 'release: prometheus' label)
 kubectl apply -f Product-App/HPA/product-app-servicemonitor.yaml -n monitoring

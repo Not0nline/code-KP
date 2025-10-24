@@ -30,3 +30,5 @@ kubectl set env deployment/predictive-scaler PROMETHEUS_URL=http://prometheus-op
 
 
 ==== Not Implemented yet ====
+
+kubectl patch servicemonitor load-tester-monitor -n default --type='json' -p='[{"op": "replace", "path": "/metadata/labels/release", "value": "prometheus"}]'

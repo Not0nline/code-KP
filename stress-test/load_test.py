@@ -53,6 +53,7 @@ CONFIG_SCHEMA = {
     "METRICS_PORT": (9105, int),
     "CONTROL_API_ENABLED": (False, _coerce_bool),
     "CONTROL_API_PORT": (8080, int),
+    "SCENARIO": ("medium", str),
     "NORMAL_MIN": (2, int),
     "NORMAL_MAX": (4, int),
     "PEAK_MIN": (35, int),  
@@ -133,6 +134,37 @@ TEST_TARGETS = {
     "predictive": True   # Test Predictive service
 }
 
+SCENARIO_DEFINITIONS = {
+    "low": {
+        "type": "low_flat",
+        "description": "Baseline trickle traffic with occasional low bursts",
+        "base_rate": 0,
+        "occasional_rate": 2,
+        "idle_probability": 0.1,
+        "burst_interval": 300,      # seconds between bursts
+        "burst_duration": 20,       # duration for each burst window
+        "burst_rate": 5,
+    },
+    "medium": {
+        "type": "poisson",
+        "description": "Poisson arrivals around moderate load with mild seasonal drift",
+        "mean_rps": 20,
+        "segment_length": 300,      # 5 minute segments inside the 30 minute season
+        "lambda_jitter": 0.15,
+        "peak_threshold_factor": 1.25,
+    },
+    "high": {
+        "type": "poisson",
+        "description": "Poisson arrivals at higher intensity with stronger bursts",
+        "mean_rps": 42,
+        "segment_length": 300,
+        "lambda_jitter": 0.2,
+        "peak_threshold_factor": 1.35,
+    },
+}
+
+SCENARIO_SEQUENCE_FULL = ["low", "medium", "high"]
+
 # Traffic pattern configuration - seasons with a single, sharp peak
 NORMAL_LOAD_RANGE = (CONFIG["NORMAL_MIN"], CONFIG["NORMAL_MAX"])
 PEAK_LOAD_RANGE = (CONFIG["PEAK_MIN"], CONFIG["PEAK_MAX"])
@@ -197,6 +229,7 @@ class LoadTester:
                  max_concurrency: int = CONFIG["MAX_CONCURRENCY"],
                  metrics_enabled: bool = False,
                  metrics_port: int = 0,
+                 scenario_name: Optional[str] = None,
                  chaos_error_rate: float = CONFIG["CHAOS_ERROR_RATE"],
                  client_timeout_normal: float = CONFIG["CLIENT_TIMEOUT_NORMAL"],
                  client_timeout_peak: float = CONFIG["CLIENT_TIMEOUT_PEAK"],
@@ -221,6 +254,15 @@ class LoadTester:
         self.tick_grace = float(tick_grace)
         self.max_rps = int(max(1, max_rps))
 
+        requested_scenario = (scenario_name or CONFIG.get("SCENARIO", "medium")).lower()
+        if requested_scenario not in SCENARIO_DEFINITIONS:
+            logger.warning("Scenario '%s' not recognised; defaulting to 'medium' profile", requested_scenario)
+            requested_scenario = "medium"
+        self.scenario_name = requested_scenario
+        self.scenario_config = SCENARIO_DEFINITIONS[self.scenario_name]
+        self.pattern_labels = {}
+        self.pattern_summary = {}
+
         # Test target flags
         self.test_hpa = test_hpa
         self.test_combined = test_combined
@@ -239,6 +281,11 @@ class LoadTester:
         self.hpa_pod_counts = []
         self.combined_pod_counts = []
         self.pod_tracking_lock = threading.Lock()
+
+        # Kubernetes client (initialized lazily if available)
+        self.k8s_apps_v1 = None
+        self.k8s_client_error_logged = False
+        self._initialize_kubernetes_client()
 
         # Create output directories
         os.makedirs(self.output_dir, exist_ok=True)
@@ -283,18 +330,39 @@ class LoadTester:
         self.metrics_debug_emissions = 0
         self.metrics_debug_updates = {}
         if self.metrics_enabled:
-            self.metrics_requests_total = PromCounter(
-                'load_tester_requests_total', 'Requests made by load tester', ['service', 'outcome']
-            )
-            self.metrics_rps = PromGauge(
-                'load_tester_rps', 'Per-second achieved RPS by service', ['service']
-            )
-            self.metrics_scheduled_rps = PromGauge(
-                'load_tester_scheduled_rps', 'Per-second scheduled RPS by service', ['service']
-            )
-            self.metrics_error_rate = PromGauge(
-                'load_tester_error_rate', 'Per-second error rate by service', ['service']
-            )
+            # Use try-except to handle metric re-registration across iterations
+            try:
+                self.metrics_requests_total = PromCounter(
+                    'load_tester_requests_total', 'Requests made by load tester', ['service', 'outcome']
+                )
+            except ValueError:
+                # Metric already registered, retrieve it from registry
+                from prometheus_client import REGISTRY
+                self.metrics_requests_total = REGISTRY._names_to_collectors.get('load_tester_requests_total')
+            
+            try:
+                self.metrics_rps = PromGauge(
+                    'load_tester_rps', 'Per-second achieved RPS by service', ['service']
+                )
+            except ValueError:
+                from prometheus_client import REGISTRY
+                self.metrics_rps = REGISTRY._names_to_collectors.get('load_tester_rps')
+            
+            try:
+                self.metrics_scheduled_rps = PromGauge(
+                    'load_tester_scheduled_rps', 'Per-second scheduled RPS by service', ['service']
+                )
+            except ValueError:
+                from prometheus_client import REGISTRY
+                self.metrics_scheduled_rps = REGISTRY._names_to_collectors.get('load_tester_scheduled_rps')
+            
+            try:
+                self.metrics_error_rate = PromGauge(
+                    'load_tester_error_rate', 'Per-second error rate by service', ['service']
+                )
+            except ValueError:
+                from prometheus_client import REGISTRY
+                self.metrics_error_rate = REGISTRY._names_to_collectors.get('load_tester_error_rate')
             if self.test_hpa:
                 self.prev_indices['HPA'] = 0
             if self.test_combined:
@@ -328,6 +396,11 @@ class LoadTester:
         
         logger.info(f"Testing services: {', '.join(active_services)}")
         logger.info(f"Results will be saved to: {self.output_dir}")
+        logger.info(
+            "Scenario profile: %s — %s",
+            self.scenario_name,
+            self.scenario_config.get("description", ""),
+        )
 
     def _update_client_metrics_for_service(self, service_name: str, results_list: list, lock: threading.Lock):
         if not self.metrics_enabled:
@@ -384,11 +457,94 @@ class LoadTester:
             self._update_client_metrics_for_service('Combined', self.combined_results, self.combined_results_lock)
 
     def generate_traffic_pattern(self):
-        """
-        Generate a seasonal traffic pattern with a gradual ramp-up before peak.
-        Ramp starts PEAK_RAMP_SECONDS before PEAK_START_OFFSET, gradually increasing
-        load to give predictive scaler time to pre-scale pods.
-        """
+        generator_type = self.scenario_config.get("type", "seasonal")
+
+        if generator_type == "low_flat":
+            time_points, request_rates, labels = self._generate_low_flat_pattern()
+        elif generator_type == "poisson":
+            time_points, request_rates, labels = self._generate_poisson_pattern()
+        else:
+            time_points, request_rates, labels = self._generate_default_seasonal_pattern()
+
+        rate_map = {second: rate for second, rate in zip(time_points, request_rates)}
+        self.pattern_labels = {second: label for second, label in zip(time_points, labels)}
+
+        self._write_pattern_summary(time_points, request_rates, labels)
+        self.save_pattern_chart(time_points, request_rates, labels)
+
+        logger.info(
+            "Generated traffic pattern for scenario '%s' using '%s' profile",
+            self.scenario_name,
+            generator_type,
+        )
+
+        return rate_map
+
+    def _generate_low_flat_pattern(self):
+        config = self.scenario_config
+        time_points = list(range(self.duration))
+        request_rates = []
+        labels = []
+
+        base_rate = max(0, int(config.get("base_rate", 0)))
+        burst_rate = max(base_rate + 1, int(config.get("burst_rate", max(1, base_rate + 1))))
+        occasional_rate = max(base_rate, int(config.get("occasional_rate", max(1, base_rate + 1))))
+        occasional_probability = float(config.get("idle_probability", 0.0))
+        occasional_probability = min(max(occasional_probability, 0.0), 1.0)
+        burst_interval = max(10, int(config.get("burst_interval", 300)))
+        burst_duration = max(1, int(config.get("burst_duration", 20)))
+
+        for second in time_points:
+            cycle_position = second % burst_interval
+            if cycle_position < burst_duration:
+                rate = burst_rate
+                label = "BURST"
+            else:
+                rate = base_rate
+                label = "IDLE" if base_rate == 0 else "BASE"
+                if occasional_probability > 0 and np.random.rand() < occasional_probability:
+                    rate = occasional_rate
+                    label = "OCCASIONAL"
+            rate = min(rate, self.max_rps)
+            request_rates.append(rate)
+            labels.append(label)
+
+        return time_points, request_rates, labels
+
+    def _generate_poisson_pattern(self):
+        config = self.scenario_config
+        segment_length = max(1, int(config.get("segment_length", 300)))
+        mean_rps = float(config.get("mean_rps", 20))
+        lambda_jitter = max(0.0, float(config.get("lambda_jitter", 0.15)))
+        peak_factor = max(1.0, float(config.get("peak_threshold_factor", 1.25)))
+
+        time_points = []
+        request_rates = []
+        labels = []
+
+        current_lambda = max(0.1, mean_rps)
+        for second in range(self.duration):
+            if second % segment_length == 0:
+                scale = np.random.uniform(1 - lambda_jitter, 1 + lambda_jitter)
+                current_lambda = max(0.1, mean_rps * max(scale, 0.05))
+
+            rate = int(np.random.poisson(current_lambda))
+            rate = min(max(rate, 0), self.max_rps)
+
+            if rate == 0:
+                label = "IDLE"
+            elif rate >= current_lambda * peak_factor:
+                label = "PEAK"
+            else:
+                label = "BASE"
+
+            time_points.append(second)
+            request_rates.append(rate)
+            labels.append(label)
+
+        return time_points, request_rates, labels
+
+    def _generate_default_seasonal_pattern(self):
         time_points = list(range(self.duration))
         request_rates = []
         load_types = []
@@ -396,38 +552,31 @@ class LoadTester:
         normal_min, normal_max = NORMAL_LOAD_RANGE
         peak_min, peak_max = PEAK_LOAD_RANGE
 
-        # Calculate number of complete seasons
         num_complete_seasons = self.duration // SEASON_DURATION
         ramp_start = PEAK_START_OFFSET - PEAK_RAMP_SECONDS
         peak_start = PEAK_START_OFFSET
         peak_end = PEAK_START_OFFSET + PEAK_DURATION
-        logger.info(f"Generating {num_complete_seasons} seasons of {SEASON_DURATION} seconds each")
+        logger.info(f"Generating {num_complete_seasons} seasons of {SEASON_DURATION} seconds each for legacy seasonal profile")
         logger.info(f"Gradual ramp pattern: Ramp [{ramp_start}, {peak_start}), Peak [{peak_start}, {peak_end}) each season")
         logger.info(f"Ramp duration: {PEAK_RAMP_SECONDS} seconds")
         logger.info(f"Volatility factor: {VOLATILITY_FACTOR}")
 
         for second in time_points:
-            # Position within current season
             season_second = second % SEASON_DURATION
-            
-            # Determine if in ramp-up, peak, or normal phase
+
             if ramp_start <= season_second < peak_start:
-                # Gradual ramp-up to peak
                 ramp_progress = (season_second - ramp_start) / PEAK_RAMP_SECONDS
                 normal_avg = (normal_min + normal_max) / 2
                 peak_avg = (peak_min + peak_max) / 2
                 base = int(normal_avg + (peak_avg - normal_avg) * ramp_progress)
                 load_types.append("SEASONAL_RAMP")
             elif peak_start <= season_second < peak_end:
-                # Full peak load
                 base = np.random.randint(peak_min, peak_max + 1)
                 load_types.append("SEASONAL_PEAK")
             else:
-                # Normal baseline load
                 base = np.random.randint(normal_min, normal_max + 1)
                 load_types.append("SEASONAL_NORMAL")
 
-            # Apply symmetric jitter if configured
             if VOLATILITY_FACTOR > 0:
                 jitter_span = int(base * VOLATILITY_FACTOR)
                 if jitter_span > 0:
@@ -436,60 +585,71 @@ class LoadTester:
 
             request_rates.append(int(base))
 
-        pattern_summary = {
-            "SEASONAL_NORMAL": {
-                "count": load_types.count("SEASONAL_NORMAL"),
-                "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "SEASONAL_NORMAL"]), 2) if load_types.count("SEASONAL_NORMAL") else 0
-            },
-            "SEASONAL_RAMP": {
-                "count": load_types.count("SEASONAL_RAMP"),
-                "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "SEASONAL_RAMP"]), 2) if load_types.count("SEASONAL_RAMP") else 0
-            },
-            "SEASONAL_PEAK": {
-                "count": load_types.count("SEASONAL_PEAK"),
-                "avg_requests": round(np.mean([r for r, t in zip(request_rates, load_types) if t == "SEASONAL_PEAK"]), 2) if load_types.count("SEASONAL_PEAK") else 0
+        return time_points, request_rates, load_types
+
+    def _write_pattern_summary(self, time_points, request_rates, labels):
+        try:
+            overall_avg = float(np.mean(request_rates)) if request_rates else 0.0
+            overall_p95 = float(np.percentile(request_rates, 95)) if request_rates else 0.0
+            overall_max = max(request_rates) if request_rates else 0
+            overall_min = min(request_rates) if request_rates else 0
+
+            summary = {
+                "scenario": self.scenario_name,
+                "description": self.scenario_config.get("description"),
+                "duration_seconds": self.duration,
+                "overall_avg_rps": round(overall_avg, 2),
+                "overall_p95_rps": round(overall_p95, 2),
+                "overall_min_rps": overall_min,
+                "overall_max_rps": overall_max,
+                "labels": {}
             }
-        }
 
-        peak_seconds_per_season = PEAK_DURATION
-        normal_seconds_per_season = SEASON_DURATION - PEAK_DURATION
+            label_counts = {}
+            label_avgs = {}
+            for label in set(labels):
+                indices = [idx for idx, value in enumerate(labels) if value == label]
+                values = [request_rates[idx] for idx in indices]
+                label_counts[label] = len(indices)
+                label_avgs[label] = round(float(np.mean(values)), 2) if values else 0.0
+                summary["labels"][label] = {
+                    "seconds": len(indices),
+                    "avg_rps": label_avgs[label],
+                    "max_rps": max(values) if values else 0,
+                    "min_rps": min(values) if values else 0,
+                }
 
-        with open(os.path.join(self.output_dir, "patterns", "pattern_summary.txt"), 'w') as f:
-            f.write("GRADUAL RAMP-UP SEASONAL TRAFFIC PATTERN\n")
-            f.write("=========================================\n\n")
-            f.write("Pattern with gradual ramp-up to showcase predictive scaling\n\n")
-            f.write(f"Test Duration: {self.duration} seconds\n")
-            f.write(f"Season Duration: {SEASON_DURATION} seconds\n")
-            f.write(f"Complete Seasons: {num_complete_seasons}\n")
-            f.write(f"Ramp Window: {ramp_start}-{peak_start}s (gradual increase)\n")
-            f.write(f"Peak Window: {peak_start}-{peak_end}s (full load)\n")
-            f.write(f"Ramp Duration: {PEAK_RAMP_SECONDS} seconds\n")
-            f.write(f"Peak Duration: {PEAK_DURATION} seconds\n")
-            f.write(f"Normal Load: {NORMAL_LOAD_RANGE} req/sec\n")
-            f.write(f"Peak Load: {PEAK_LOAD_RANGE} req/sec\n")
-            f.write(f"Volatility: {VOLATILITY_FACTOR}\n\n")
-            f.write("PATTERN BREAKDOWN\n")
-            f.write("----------------\n")
-            for pt, stats in pattern_summary.items():
-                f.write(f"{pt}: {stats['count']} seconds, Avg: {stats['avg_requests']} req/sec\n")
-            f.write(f"\nPer Season Breakdown:\n")
-            f.write(f"- Normal: {normal_seconds_per_season} seconds per season\n")
-            f.write(f"- Peak: {peak_seconds_per_season} seconds per season\n")
+            self.pattern_summary = summary
 
-        # Optional chart
-        self.save_pattern_chart(time_points, request_rates, load_types)
-        logger.info("Generated gradual ramp-up seasonal traffic pattern")
-        logger.info(f"✅ {num_complete_seasons} seasons: {PEAK_RAMP_SECONDS}s ramp starting at {ramp_start}s, {PEAK_DURATION}s peak at {peak_start}s")
-        rate_map = {second: rate for second, rate in zip(time_points, request_rates)}
-        return rate_map
+            summary_path = os.path.join(self.output_dir, "patterns", "pattern_summary.txt")
+            with open(summary_path, 'w') as f:
+                f.write(f"SCENARIO: {self.scenario_name}\n")
+                if summary.get("description"):
+                    f.write(f"Description: {summary['description']}\n")
+                f.write(f"Duration: {self.duration} seconds\n")
+                f.write(f"Average RPS: {summary['overall_avg_rps']}\n")
+                f.write(f"P95 RPS: {summary['overall_p95_rps']}\n")
+                f.write(f"Min/Max RPS: {summary['overall_min_rps']} / {summary['overall_max_rps']}\n")
+                f.write("Scenario Config:\n")
+                f.write(json.dumps(self.scenario_config, indent=2))
+                f.write("\n")
+                f.write("\nLabel Breakdown\n")
+                f.write("----------------\n")
+                for label, details in summary["labels"].items():
+                    f.write(
+                        f"{label}: {details['seconds']} seconds, Avg={details['avg_rps']} req/s, "
+                        f"Min={details['min_rps']}, Max={details['max_rps']}\n"
+                    )
+        except Exception as exc:
+            logger.error("Failed to write pattern summary: %s", exc)
 
-    def save_pattern_chart(self, time_points, request_rates, load_types):
+    def save_pattern_chart(self, time_points, request_rates, labels):
         """Save the pattern as a CSV for visualization."""
         try:
             df = pd.DataFrame({
                 'second': time_points,
                 'requests': request_rates,
-                'type': load_types
+                'label': labels
             })
             df.to_csv(os.path.join(self.output_dir, "patterns", "pattern.csv"), index=False)
         except Exception as e:
@@ -830,7 +990,7 @@ class LoadTester:
         pod_tracker.start()
         logger.info("Started pod count tracking (sampling every 5 seconds)")
         
-        current_pattern_type = "NORMAL"
+        current_pattern_type = "INIT"
         rate_history = []
         
         for second in range(self.duration):
@@ -838,24 +998,16 @@ class LoadTester:
                 logger.info("Stopping test early due to stop event")
                 break
             
-            request_count = self.request_pattern.get(second, 1)
+            request_count = int(self.request_pattern.get(second, 0))
             rate_history.append(request_count)
             if len(rate_history) > 120:
                 rate_history.pop(0)
             self.current_request_rate = request_count
             
-            # Determine pattern type based on seasonal position
-            season_position = second % SEASON_DURATION
-            ramp_start_pos = PEAK_START_OFFSET - PEAK_RAMP_SECONDS
-            is_ramp = (ramp_start_pos <= season_position < PEAK_START_OFFSET)
-            is_peak = (PEAK_START_OFFSET <= season_position < PEAK_START_OFFSET + PEAK_DURATION)
-            # Apply burst multiplier for the first few seconds of the peak window
-            if is_peak:
-                seconds_into_peak = season_position - PEAK_START_OFFSET
-                if 0 <= seconds_into_peak < BURST_ON_PEAK_SECONDS:
-                    request_count = int(request_count * BURST_ON_PEAK_MULTIPLIER)
+            current_label = self.pattern_labels.get(second, "BASE")
+            normalized_label = str(current_label).upper()
+            is_peak = normalized_label in {"PEAK", "BURST", "SEASONAL_PEAK"}
 
-            # Clamp final intended RPS to configured maximum
             if request_count > self.max_rps:
                 request_count = self.max_rps
 
@@ -868,19 +1020,24 @@ class LoadTester:
             
             # Log the scheduled count every 10 seconds to verify fairness
             if second % 10 == 0:
-                logger.info(f"Second {second}: Scheduling {request_count} requests to EACH service (HPA + Combined)")
-            
-            # Determine pattern type for logging
-            if is_peak:
-                pattern_type = "SEASONAL_PEAK"
-            elif is_ramp:
-                pattern_type = "SEASONAL_RAMP"
-            else:
-                pattern_type = "SEASONAL_NORMAL"
-            
-            if pattern_type != current_pattern_type:
-                logger.info(f"Second {second}: Pattern changed from {current_pattern_type} to {pattern_type}, scheduling {request_count} req/s")
-                current_pattern_type = pattern_type
+                logger.info(
+                    "Second %s: Scenario=%s, label=%s, scheduling %s req/s to each service",
+                    second,
+                    self.scenario_name,
+                    current_label,
+                    request_count,
+                )
+
+            if normalized_label != current_pattern_type:
+                if current_pattern_type != "INIT":
+                    logger.info(
+                        "Second %s: Traffic phase shift from %s to %s (requested %s req/s)",
+                        second,
+                        current_pattern_type,
+                        normalized_label,
+                        request_count,
+                    )
+                current_pattern_type = normalized_label
 
             # Pre-build identical batch for both services if both are enabled
             task_batch = None
@@ -1057,6 +1214,7 @@ class LoadTester:
             "start_time": self.start_time.isoformat(),
             "end_time": end_time.isoformat(),
             "duration_seconds": (end_time - self.start_time).total_seconds(),
+            "scenario": self.scenario_name,
             "hpa_requests": hpa_req_count,
             "combined_requests": combined_req_count,
             "hpa_success_rate": hpa_success,
@@ -1079,22 +1237,40 @@ class LoadTester:
         return successes / len(functional_requests)
 
     def get_pod_count(self, deployment_name):
-        """Get the current number of ready pods for a deployment using kubectl."""
+        """Get the current number of ready pods for a deployment using the Kubernetes API."""
+        if not self.k8s_apps_v1:
+            if not self.k8s_client_error_logged:
+                logger.warning("Kubernetes client unavailable; skipping pod count tracking.")
+                self.k8s_client_error_logged = True
+            return 0
+
         try:
-            import subprocess
-            result = subprocess.run(
-                ['kubectl', 'get', 'deployment', deployment_name, '-n', 'default', 
-                 '-o', 'jsonpath={.status.readyReplicas}'],
-                capture_output=True,
-                text=True,
-                timeout=5
+            deployment = self.k8s_apps_v1.read_namespaced_deployment(
+                name=deployment_name,
+                namespace='default'
             )
-            if result.returncode == 0 and result.stdout.strip():
-                return int(result.stdout.strip())
+            ready_replicas = deployment.status.ready_replicas
+            return ready_replicas if ready_replicas is not None else 0
+        except Exception as exc:
+            if not self.k8s_client_error_logged:
+                logger.warning("Failed to query pod count via Kubernetes API: %s", exc)
+                self.k8s_client_error_logged = True
             return 0
-        except Exception as e:
-            logger.warning(f"Failed to get pod count for {deployment_name}: {e}")
-            return 0
+
+    def _initialize_kubernetes_client(self):
+        """Initialize the Kubernetes API client for pod tracking."""
+        try:
+            from kubernetes import client as kube_client, config as kube_config
+            try:
+                kube_config.load_incluster_config()
+            except Exception:
+                # Fallback for local testing (e.g., kubectl proxy)
+                kube_config.load_kube_config()
+            self.k8s_apps_v1 = kube_client.AppsV1Api()
+            logger.info("Kubernetes client initialized for pod tracking")
+        except Exception as exc:
+            self.k8s_apps_v1 = None
+            logger.debug("Kubernetes client initialization skipped: %s", exc)
 
     def track_pod_counts(self):
         """Background thread to track pod counts every 5 seconds."""
@@ -1338,6 +1514,9 @@ def parse_arguments():
     parser.add_argument('--combined-url', type=str, default=DEFAULT_COMBINED_URL, help='URL for Combined service')
     parser.add_argument('--predictive-url', type=str, default=DEFAULT_PREDICTIVE_URL, help='URL for Predictive Scaler service')
     parser.add_argument('--test-predictive', action='store_true', default=False, help='Include predictive scaler in testing')
+    parser.add_argument('--scenario', type=str, default=CONFIG.get("SCENARIO", "medium"),
+                        choices=sorted(list(SCENARIO_DEFINITIONS.keys())),
+                        help='Traffic scenario profile to use')
     
     # Test configuration arguments
     parser.add_argument('--duration', type=int, default=CONFIG["DURATION"],
@@ -1386,6 +1565,8 @@ orchestrator_state = {
     "results": [],
     "output_dir": None,
     "start_time": None,
+    "active_scenarios": [],
+    "current_scenario": None,
 }
 
 def create_control_api():
@@ -1425,15 +1606,39 @@ def create_control_api():
             skip_warmup = bool(data.get('skip_warmup', False))
             output_dir = data.get('output_dir', './multi_run_results')
             max_concurrency = int(data.get('max_concurrency', CONFIG["MAX_CONCURRENCY"]))
+            scenario_input = data.get('scenario', CONFIG.get('SCENARIO', 'medium'))
+            scenario_key = str(scenario_input).lower()
+
+            if isinstance(data.get('scenarios'), list) and data['scenarios']:
+                scenario_list = []
+                for item in data['scenarios']:
+                    key = str(item).lower()
+                    if key == 'full':
+                        scenario_list.extend(SCENARIO_SEQUENCE_FULL)
+                    elif key in SCENARIO_DEFINITIONS:
+                        scenario_list.append(key)
+                    else:
+                        logger.warning("Ignoring unknown scenario '%s' from payload", key)
+                if not scenario_list:
+                    scenario_list = [scenario_key if scenario_key in SCENARIO_DEFINITIONS else CONFIG.get('SCENARIO', 'medium')]
+            elif scenario_key == 'full':
+                scenario_list = list(SCENARIO_SEQUENCE_FULL)
+            else:
+                if scenario_key not in SCENARIO_DEFINITIONS:
+                    logger.warning("Unknown scenario '%s' requested; defaulting to '%s'", scenario_key, CONFIG.get('SCENARIO', 'medium'))
+                    scenario_key = CONFIG.get('SCENARIO', 'medium')
+                scenario_list = [scenario_key]
             
             # Start orchestrator in background thread
             def run_orchestrator():
                 try:
                     orchestrator_state["running"] = True
-                    orchestrator_state["total_iterations"] = iterations
+                    orchestrator_state["total_iterations"] = iterations * len(scenario_list)
                     orchestrator_state["current_iteration"] = 0
                     orchestrator_state["results"] = []
                     orchestrator_state["start_time"] = datetime.now()
+                    orchestrator_state["active_scenarios"] = scenario_list
+                    orchestrator_state["current_scenario"] = None
                     
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     batch_dir = os.path.join(output_dir, f"batch_{timestamp}")
@@ -1443,47 +1648,68 @@ def create_control_api():
                     logger.info("="*80)
                     logger.info("ORCHESTRATED TEST RUN STARTING (via API)")
                     logger.info("="*80)
-                    logger.info(f"Iterations: {iterations}")
+                    logger.info(f"Iterations per scenario: {iterations}")
                     logger.info(f"Duration per test: {duration}s")
                     logger.info(f"Warmup: {warmup}s")
                     logger.info(f"Cooldown: {cooldown}s")
                     logger.info(f"Output: {batch_dir}")
+                    logger.info(f"Scenario order: {', '.join(scenario_list)}")
                     logger.info("="*80)
-                    
-                    for i in range(1, iterations + 1):
-                        orchestrator_state["current_iteration"] = i
-                        logger.info(f"\n{'='*80}")
-                        logger.info(f"ITERATION {i}/{iterations}")
-                        logger.info(f"{'='*80}")
-                        
-                        iteration_dir = os.path.join(batch_dir, f"iteration_{i:02d}")
-                        os.makedirs(iteration_dir, exist_ok=True)
-                        
-                        # Run single test
-                        tester = LoadTester(
-                            hpa_url=CONFIG["HPA_URL"],
-                            combined_url=CONFIG["COMBINED_URL"],
-                            predictive_url=CONFIG["PREDICTIVE_URL"],
-                            duration=duration,
-                            output_dir=iteration_dir,
-                            test_hpa=True,
-                            test_combined=True,
-                            test_predictive=False,
-                            max_concurrency=max_concurrency,
-                            metrics_enabled=False,
-                            metrics_port=0,
-                        )
-                        
-                        result = tester.run_test()
-                        orchestrator_state["results"].append({
-                            "iteration": i,
-                            "result": result,
-                        })
-                        
-                        # Cooldown between iterations
-                        if i < iterations:
-                            logger.info(f"Cooldown: {cooldown}s")
-                            time.sleep(cooldown)
+                    total_iterations = iterations * len(scenario_list)
+                    overall_iteration = 0
+
+                    for scenario_name in scenario_list:
+                        orchestrator_state["current_scenario"] = scenario_name
+                        scenario_dir = os.path.join(batch_dir, scenario_name)
+                        os.makedirs(scenario_dir, exist_ok=True)
+
+                        logger.info("\n%s", "="*80)
+                        logger.info("SCENARIO: %s", scenario_name.upper())
+                        logger.info("%s", "="*80)
+
+                        for scenario_iteration in range(1, iterations + 1):
+                            overall_iteration += 1
+                            orchestrator_state["current_iteration"] = overall_iteration
+                            logger.info(f"\n{'='*80}")
+                            logger.info(
+                                "ITERATION %s/%s (scenario %s, pass %s/%s)",
+                                overall_iteration,
+                                total_iterations,
+                                scenario_name,
+                                scenario_iteration,
+                                iterations,
+                            )
+                            logger.info(f"{'='*80}")
+
+                            iteration_dir = os.path.join(scenario_dir, f"iteration_{scenario_iteration:02d}")
+                            os.makedirs(iteration_dir, exist_ok=True)
+
+                            tester = LoadTester(
+                                hpa_url=CONFIG["HPA_URL"],
+                                combined_url=CONFIG["COMBINED_URL"],
+                                predictive_url=CONFIG["PREDICTIVE_URL"],
+                                duration=duration,
+                                output_dir=iteration_dir,
+                                test_hpa=True,
+                                test_combined=True,
+                                test_predictive=False,
+                                max_concurrency=max_concurrency,
+                                metrics_enabled=CONFIG.get("METRICS_PORT", 0) > 0 and PROM_AVAILABLE,
+                                metrics_port=CONFIG.get("METRICS_PORT", 0),
+                                scenario_name=scenario_name,
+                            )
+
+                            result = tester.run_test()
+                            orchestrator_state["results"].append({
+                                "sequence": overall_iteration,
+                                "scenario": scenario_name,
+                                "iteration": scenario_iteration,
+                                "result": result,
+                            })
+
+                            if overall_iteration < total_iterations:
+                                logger.info(f"Cooldown: {cooldown}s")
+                                time.sleep(cooldown)
                     
                     logger.info("\n" + "="*80)
                     logger.info("ALL ITERATIONS COMPLETED")
@@ -1493,9 +1719,10 @@ def create_control_api():
                     summary_path = os.path.join(batch_dir, "api_summary.json")
                     with open(summary_path, 'w') as f:
                         json.dump({
-                            "iterations": iterations,
+                            "iterations_per_scenario": iterations,
                             "duration": duration,
                             "warmup": warmup,
+                            "scenarios": scenario_list,
                             "start_time": orchestrator_state["start_time"].isoformat(),
                             "end_time": datetime.now().isoformat(),
                             "results": orchestrator_state["results"],
@@ -1508,6 +1735,8 @@ def create_control_api():
                 finally:
                     orchestrator_state["running"] = False
                     orchestrator_state["current_iteration"] = 0
+                    orchestrator_state["current_scenario"] = None
+                    orchestrator_state["active_scenarios"] = scenario_list
             
             thread = threading.Thread(target=run_orchestrator, daemon=True)
             thread.start()
@@ -1517,6 +1746,7 @@ def create_control_api():
                 "iterations": iterations,
                 "duration": duration,
                 "output_dir": output_dir,
+                "scenarios": scenario_list,
             }), 202
             
         except Exception as e:
@@ -1532,6 +1762,8 @@ def create_control_api():
             "total_iterations": orchestrator_state["total_iterations"],
             "output_dir": orchestrator_state["output_dir"],
             "start_time": orchestrator_state["start_time"].isoformat() if orchestrator_state["start_time"] else None,
+            "current_scenario": orchestrator_state["current_scenario"],
+            "scenarios": orchestrator_state["active_scenarios"],
             "results_count": len(orchestrator_state["results"]),
         })
     
@@ -1540,6 +1772,7 @@ def create_control_api():
         """Get results from completed iterations."""
         return jsonify({
             "output_dir": orchestrator_state["output_dir"],
+            "scenarios": orchestrator_state["active_scenarios"],
             "results": orchestrator_state["results"],
         })
     
@@ -1620,6 +1853,11 @@ def main():
         logger.info(f"Combined URL: {args.combined_url}")
     if test_predictive:
         logger.info(f"Predictive URL: {args.predictive_url}")
+    scenario_for_run = args.scenario
+    if scenario_for_run not in SCENARIO_DEFINITIONS:
+        logger.warning("Scenario '%s' not recognised for CLI mode; defaulting to '%s'", scenario_for_run, CONFIG.get('SCENARIO', 'medium'))
+        scenario_for_run = CONFIG.get('SCENARIO', 'medium')
+    logger.info(f"Traffic scenario: {scenario_for_run}")
     logger.info(f"Duration: {args.duration} seconds")
     logger.info(f"Output directory: {args.output_dir}")
     logger.info(f"Seasonal traffic pattern (single peak per season)")
@@ -1664,12 +1902,13 @@ def main():
         test_predictive=test_predictive,
         max_concurrency=args.max_concurrency,
         metrics_enabled=metrics_enabled,
-    metrics_port=args.metrics_port,
+        metrics_port=args.metrics_port,
         chaos_error_rate=args.chaos_error_rate,
         client_timeout_normal=args.client_timeout_normal,
         client_timeout_peak=args.client_timeout_peak,
         tick_grace=args.tick_grace,
-        max_rps=args.max_rps
+        max_rps=args.max_rps,
+        scenario_name=scenario_for_run
     )
 
     try:

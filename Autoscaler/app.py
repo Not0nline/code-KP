@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 import logging
 import joblib
 import traceback
+from collections import deque
 from prometheus_client import Counter, Gauge, Summary, Histogram
 from prometheus_flask_exporter import PrometheusMetrics
 from prometheus_api_client import PrometheusConnect
@@ -137,8 +138,8 @@ config = {
     "target_namespace": os.getenv('TARGET_NAMESPACE', 'default'),
     "cost_optimization": {
         "enabled": True,
-    "target_cpu_utilization": _env_float('TARGET_CPU_UTILIZATION', 100),
-    "scale_up_threshold": _env_float('CPU_SCALE_UP_THRESHOLD', 95),
+    "target_cpu_utilization": _env_float('TARGET_CPU_UTILIZATION', 65),
+    "scale_up_threshold": _env_float('CPU_SCALE_UP_THRESHOLD', 70),
     "scale_down_threshold": _env_float('CPU_SCALE_DOWN_THRESHOLD', 50),  
         "min_replicas": 1,
         "max_replicas": 10,
@@ -185,7 +186,9 @@ config = {
 last_scaling_time = 0
 last_scale_up_time = 0
 last_scale_down_time = 0
-traffic_data = []
+# Use a fixed-size ring buffer (deque) to enforce exactly 240 most-recent points
+# This prevents unbounded growth and keeps memory usage predictable.
+traffic_data = deque(maxlen=240)
 training_dataset = []  # Permanent 4-hour dataset for model training
 is_collecting = False
 collection_thread = None
@@ -260,6 +263,48 @@ models_performance_history = {
     'holt_winters': []
 }
 
+
+def ensure_traffic_buffer_integrity():
+    """Guard the shared traffic data buffer against accidental list conversions or overflow."""
+    global traffic_data
+
+    buffer_type = type(traffic_data).__name__
+    current_maxlen = traffic_data.maxlen if isinstance(traffic_data, deque) else None
+
+    # Rebuild as deque if someone replaced it with a list or changed/removed maxlen
+    if not isinstance(traffic_data, deque) or current_maxlen != 240:
+        logger.warning(
+            "Traffic buffer integrity check: rebuilding %s into deque(maxlen=240)",
+            buffer_type
+        )
+        try:
+            snapshot = list(traffic_data)
+        except TypeError:
+            snapshot = []
+        traffic_data = deque(snapshot, maxlen=240)
+
+    # Enforce the maxlen manually if the deque temporarily exceeded it (should be rare)
+    maxlen = traffic_data.maxlen or 240
+    overflow = max(0, len(traffic_data) - maxlen)
+    if overflow > 0:
+        for _ in range(overflow):
+            traffic_data.popleft()
+        logger.warning("Traffic buffer integrity check: trimmed %s excess points", overflow)
+
+    return len(traffic_data)
+
+
+def get_traffic_buffer_diagnostics():
+    """Return current ring buffer state to verify the 240-point cap."""
+    ensure_traffic_buffer_integrity()
+    max_size = traffic_data.maxlen or 240
+    current_size = len(traffic_data)
+    return {
+        'current_size': current_size,
+        'max_size': max_size,
+        'within_bounds': current_size <= max_size
+    }
+
 def main_coroutine():
     """
     Main coroutine: Handles periodic predictions and scaling decisions
@@ -282,9 +327,8 @@ def main_coroutine():
                 # Always append to traffic_data to keep a continuous history for matching/predictions
                 with file_lock:  # Thread-safe data access
                     traffic_data.append(current_metrics)
-                    # Keep sliding window of recent data (last 24 hours up to 1440 points)
-                    if len(traffic_data) > 1440:
-                        traffic_data = traffic_data[-1440:]
+                    # traffic_data is a deque with maxlen=240 so it will auto-trim oldest entries
+                    # Ensure we don't accidentally convert it to a list elsewhere
                 if current_metrics['cpu_utilization'] >= config['cpu_threshold']:
                     logger.debug(f"Main coroutine: Data collected - CPU={current_metrics['cpu_utilization']:.1f}% (above threshold {config['cpu_threshold']}%)")
                 else:
@@ -508,7 +552,8 @@ def update_holt_winters_performance():
         # Run simulated predictions to calculate current MSE
         if len(traffic_data) >= 30:  # Need sufficient data
             # Use recent data window for HW performance evaluation
-            recent_data = traffic_data[-180:] if len(traffic_data) > 180 else traffic_data
+            traffic_list = list(traffic_data)
+            recent_data = traffic_list[-180:] if len(traffic_list) > 180 else traffic_list
             
             # Calculate MSE using recent predictions vs actual values
             hw_mse = calculate_mse_robust('holt_winters')
@@ -562,7 +607,8 @@ def retrain_gru_model_async():
     try:
         if not is_training and len(traffic_data) >= MIN_DATA_POINTS_FOR_GRU:
             # Use sliding window of recent data for training
-            training_data_copy = traffic_data[-MIN_DATA_POINTS_FOR_GRU:].copy()
+            traffic_list = list(traffic_data)
+            training_data_copy = traffic_list[-MIN_DATA_POINTS_FOR_GRU:]
             
             # Start async training
             training_thread = threading.Thread(
@@ -789,8 +835,11 @@ def load_data():
         # Load current traffic data
         if os.path.exists(DATA_FILE):
             df = pd.read_csv(DATA_FILE)
-            traffic_data = df.to_dict('records')
-            logger.info(f"Loaded {len(traffic_data)} current data points from {DATA_FILE}")
+            records = df.to_dict('records')
+            # Keep only the most recent 240 points when loading
+            traffic_data.clear()
+            traffic_data.extend(records[-240:])
+            logger.info(f"Loaded {len(traffic_data)} current data points from {DATA_FILE} (trimmed to 240)")
         
         # Load training dataset if it exists and collection is complete
         training_file = DATA_FILE.replace('.csv', '_training.csv')
@@ -798,10 +847,16 @@ def load_data():
             training_df = pd.read_csv(training_file)
             training_dataset = training_df.to_dict('records')
             logger.info(f"Loaded {len(training_dataset)} training data points from {training_file}")
+        logger.debug(f"Traffic buffer diagnostics after load: {get_traffic_buffer_diagnostics()}")
+        ensure_traffic_buffer_integrity()
         
     except Exception as e:
         logger.error(f"Error loading data: {e}")
-        traffic_data = []
+        # Ensure traffic_data remains a deque
+        try:
+            traffic_data.clear()
+        except Exception:
+            traffic_data = deque(maxlen=240)
         training_dataset = []
 
 def save_data():
@@ -833,15 +888,22 @@ def filter_stale_data(max_age_hours=24):
         original_count = len(traffic_data)
         
         # Ensure timestamp is a string before parsing
-        traffic_data = [
-            d for d in traffic_data 
+        filtered = [
+            d for d in list(traffic_data)
             if 'timestamp' in d and isinstance(d['timestamp'], str) and 
                datetime.strptime(d['timestamp'], "%Y-%m-%d %H:%M:%S") > cutoff_time
         ]
+        # Replace contents of the deque while preserving maxlen
+        traffic_data.clear()
+        # Keep only the most recent 240 points after filtering
+        if filtered:
+            traffic_data.extend(filtered[-240:])
         
         removed_count = original_count - len(traffic_data)
         if removed_count > 0:
             logger.info(f"Removed {removed_count} stale data points older than {max_age_hours} hours.")
+        logger.debug(f"Traffic buffer diagnostics after stale filter: {get_traffic_buffer_diagnostics()}")
+        ensure_traffic_buffer_integrity()
     except (ValueError, TypeError) as e:
         logger.error(f"Error parsing timestamps during stale data filtering: {e}. Data may be corrupt.")
 
@@ -1056,7 +1118,7 @@ def add_prediction_to_history(model_name, predicted_replicas, timestamp):
             predicted_load = float(predicted_replicas) * tpr
         if predicted_load is None or predicted_load == 0.0:
             # Fallback to recent average if we have no meaningful throughput
-            recent_tr = [float(d.get('traffic', 0.0)) for d in traffic_data[-10:]] if traffic_data else []
+            recent_tr = [float(d.get('traffic', 0.0)) for d in list(traffic_data)[-10:]] if traffic_data else []
             predicted_load = float(sum(recent_tr) / max(1, len(recent_tr))) if recent_tr else 0.0
     except Exception:
         # Final fallback
@@ -1167,7 +1229,7 @@ def create_emergency_gru_predictions():
         logger.warning("🆘 Creating emergency synthetic GRU predictions for MSE calculation")
         
         # Create realistic predictions based on recent data
-        recent_replicas = [d['replicas'] for d in traffic_data[-10:]]
+        recent_replicas = [d['replicas'] for d in list(traffic_data)[-10:]]
         avg_replicas = sum(recent_replicas) / len(recent_replicas)
         
         # Create 5 synthetic predictions with slight variations
@@ -1398,7 +1460,7 @@ def calculate_mse_robust(model_name):
             tol = timedelta(minutes=max(1, int(config['mse_config'].get('prediction_match_tolerance_minutes', 5))))
             closest_val = None
             closest_dt = None
-            for d in traffic_data[-200:]:
+            for d in list(traffic_data)[-200:]:
                 try:
                     dts = datetime.strptime(d.get('timestamp', ''), "%Y-%m-%d %H:%M:%S")
                 except Exception:
@@ -2070,20 +2132,20 @@ def collect_metrics_from_prometheus():
             else:
                 logger.debug(f"Data collected (idle): CPU={current_cpu:.1f}% (below threshold {config['cpu_threshold']}%)")
             
-            # Keep only last 4 hours of data with memory protection
+            # Keep only most recent points within retention window and limit to 240 points
             current_time = datetime.now()
             cutoff_time = current_time - timedelta(hours=24)
-            
-            # Clean data with better memory management
+
             original_size = len(traffic_data)
-            traffic_data = [d for d in traffic_data if 
-                          datetime.strptime(d['timestamp'], "%Y-%m-%d %H:%M:%S") > cutoff_time]
-            
-            # Additional protection: limit to max 2000 points to prevent memory issues
-            if len(traffic_data) > 2000:
-                traffic_data = traffic_data[-2000:]
-                logger.warning(f"Traffic data truncated to 2000 points to prevent memory issues")
-            
+            filtered = [d for d in list(traffic_data) if 
+                        datetime.strptime(d['timestamp'], "%Y-%m-%d %H:%M:%S") > cutoff_time]
+            traffic_data.clear()
+            if filtered:
+                # Keep only the last 240 entries to enforce fixed-size buffer
+                traffic_data.extend(filtered[-240:])
+
+            ensure_traffic_buffer_integrity()
+
             if original_size != len(traffic_data):
                 logger.debug(f"Cleaned traffic data: {original_size} -> {len(traffic_data)} points")
             
@@ -2176,7 +2238,7 @@ def collect_metrics_from_prometheus():
                 logger.info(f"🚀 Starting ASYNC GRU training: {training_reason}")
                 try:
                     # Create thread-safe copy of traffic data for training
-                    traffic_data_copy = traffic_data[:]
+                    traffic_data_copy = list(traffic_data)
                     was_first_training = not is_model_trained
                     
                     # Start async training in separate thread
@@ -2207,7 +2269,7 @@ def collect_metrics_from_prometheus():
                     # Mark milestone and snapshot a training dataset, but DO NOT reset or stop collection
                     data_collection_complete = True
                     global training_dataset
-                    training_dataset = traffic_data.copy()
+                    training_dataset = list(traffic_data)
                     save_collection_status()
                     save_data()
                     logger.info(f"✅ 4-hour runtime milestone reached. Snapshot training dataset size: {len(training_dataset)}. Continuing collection.")
@@ -2290,8 +2352,11 @@ def build_gru_model_with_data(data_copy):
     global gru_model, last_training_time, is_model_trained, scaler_X, scaler_y
     
     # Temporarily replace global traffic_data with our copy for preprocessing
-    original_traffic_data = traffic_data[:]
-    traffic_data[:] = data_copy
+    original_traffic_data = list(traffic_data)
+    # Replace contents of the global deque with the provided data copy (trim to 240)
+    traffic_data.clear()
+    if data_copy:
+        traffic_data.extend(list(data_copy)[-240:])
     
     try:
         # Use the existing build_gru_model function which is already complete
@@ -2304,7 +2369,9 @@ def build_gru_model_with_data(data_copy):
         return False
     finally:
         # Always restore original traffic data
-        traffic_data[:] = original_traffic_data
+        traffic_data.clear()
+        if original_traffic_data:
+            traffic_data.extend(original_traffic_data[-240:])
 
 def build_gru_model():
     """Build and train GRU model with enhanced error handling and validation."""
@@ -2456,7 +2523,7 @@ def predict_with_holtwinters(steps=None):
 
     try:
         # Always use recent sliding window of traffic_data (paper approach)
-        prediction_data = traffic_data
+        prediction_data = list(traffic_data)
 
         if len(prediction_data) < 5:  # Reduced minimum for faster testing
             logger.info(f"Not enough data for Holt-Winters prediction: {len(prediction_data)} < 5")
@@ -2569,7 +2636,8 @@ def predict_with_gru(steps=None):
         return None
 
     # Use training dataset if collection is complete, otherwise use current data
-    prediction_data = training_dataset if data_collection_complete and training_dataset else traffic_data
+    source_data = training_dataset if data_collection_complete and training_dataset else traffic_data
+    prediction_data = list(source_data)
 
     logger.info(
         f"🔄 GRU prediction starting: model_loaded={gru_model is not None}, data_points={len(prediction_data)}, using_training_data={data_collection_complete}"
@@ -2849,10 +2917,10 @@ def make_scaling_decision_with_minheap(predictions):
             predicted_replicas = int(round(pred_value))
             priority = 2.5 + (rank * 0.1)  # Predictions get higher priority than reactive scaling
             
-            # Predictive scale up - be proactive
+            # Predictive scale up - be MORE proactive to avoid success rate drops
             if predicted_replicas > current_replicas and current_time - last_scale_up_time >= 5:
-                # Use predictive scaling more aggressively - scale before CPU gets high
-                if current_cpu > 40 or model_name in ['holt_winters']:  # Trust predictions more
+                # Trust predictions early - scale up when CPU > 30% to stay ahead of load
+                if current_cpu > 30 or model_name in ['holt_winters']:  # Much more aggressive
                     heapq.heappush(decision_heap, (priority, "scale_up", predicted_replicas, f"predictive_{model_name}_mse_{mse:.3f}"))
             
             # Predictive scale down - be efficient  
@@ -3007,6 +3075,8 @@ def start_collection():
     """Start the metrics collection thread."""
     global is_collecting, collection_thread, data_collection_complete
     
+    ensure_traffic_buffer_integrity()
+
     if data_collection_complete:
         logger.info("Data collection already complete. Using stored 4-hour dataset.")
         return False
@@ -3092,10 +3162,10 @@ def status():
         'collection_complete': data_collection_complete,
         'collection_start_time': data_collection_start_time.isoformat() if data_collection_start_time else None,
         'is_collecting': is_collecting,
-    'runtime_hours_collected': (len(traffic_data) / 60),  # Each data point ≈ 1 minute
-    'remaining_runtime_hours': max(0, 4 - (len(traffic_data) / 60)),
-    'progress_percentage': min(100, (len(traffic_data) / 240) * 100),  # 240 = 4hrs * 60min
-    'data_points_collected': len(traffic_data),
+        'runtime_hours_collected': (len(traffic_data) / 60),  # Each data point ≈ 1 minute
+        'remaining_runtime_hours': max(0, 4 - (len(traffic_data) / 60)),
+        'progress_percentage': min(100, (len(traffic_data) / 240) * 100),  # 240 = 4hrs * 60min
+        'data_points_collected': len(traffic_data),
         'target_data_points': 240,  # 4 hours * 60 minutes
         'sessions_info': {
             'aws_academy_sessions_needed': 1,  # 4 hours / 4 hours per session
@@ -3119,8 +3189,9 @@ def status():
         'idle_minutes': idle_minutes,
         'consecutive_low_cpu_count': consecutive_low_cpu_count,
         'current_cpu': current_cpu,
-    'current_traffic': traffic_data[-1]['traffic'] if traffic_data else 0,
-    'current_replicas': traffic_data[-1]['replicas'] if traffic_data else 1,
+        'current_traffic': traffic_data[-1]['traffic'] if traffic_data else 0,
+        'current_replicas': traffic_data[-1]['replicas'] if traffic_data else 1,
+        'traffic_buffer': get_traffic_buffer_diagnostics(),
         'last_scaling_decision': last_scaling_decision_info,
         'data_collection_status': collection_status,
         'gru_debug': {
@@ -3147,11 +3218,13 @@ def status():
 @app.route('/data', methods=['GET'])
 def get_metrics_data():
     """Return collected metrics data."""
-    recent_data = traffic_data[-100:] if traffic_data else []
+    recent_data = list(traffic_data)[-100:] if traffic_data else []
     
     return jsonify({
         "data_points": len(traffic_data),
         "recent_metrics": recent_data,
+        "buffer_maxlen": traffic_data.maxlen or 240,
+        "buffer_within_bounds": len(traffic_data) <= (traffic_data.maxlen or 240),
         "using_gru": config['use_gru'],
         "mse_enabled": config['mse_config']['enabled']
     })
@@ -3226,6 +3299,7 @@ def get_prediction():
     hw_status = f"{holt_winters_mse:.3f}" if holt_winters_mse != float('inf') else "insufficient_data"
     
     return jsonify({
+        "target_deployment": config.get('target_deployment', 'unknown'),
         "method": method,
         "predictions": predictions,
         "scaling_decision": decision,
@@ -3248,6 +3322,7 @@ def predict_combined():
         if not traffic_data:
             # No data yet, return minimum replicas
             return jsonify({
+                'target_deployment': config.get('target_deployment', 'unknown'),
                 'method_used': 'fallback',
                 'predictions': [1],
                 'recommended_replicas': 1,
@@ -3372,6 +3447,7 @@ def predict_combined():
         hw_status = f"{holt_winters_mse:.3f}" if holt_winters_mse != float('inf') else "insufficient_data"
         
         return jsonify({
+            'target_deployment': config.get('target_deployment', 'unknown'),
             'method_used': method,
             'predictions': predictions if predictions else [recommended_replicas_value],
             'recommended_replicas': int(recommended_replicas_value),
@@ -3403,6 +3479,7 @@ def predict_combined():
     except Exception as e:
         logger.error(f"Error in predict_combined: {e}")
         return jsonify({
+            'target_deployment': config.get('target_deployment', 'unknown'),
             'method_used': 'fallback',
             'predictions': [1],
             'recommended_replicas': 1,
@@ -3566,7 +3643,7 @@ def initialize():
                 # Start GRU training in background thread to avoid blocking Flask
                 training_thread = threading.Thread(
                     target=async_model_training,
-                    args=("initialization", traffic_data.copy(), True)
+                    args=("initialization", list(traffic_data), True)
                 )
                 training_thread.daemon = True
                 training_thread.start()
@@ -3751,7 +3828,7 @@ def debug_predictions():
         result = {
             'timestamp': datetime.now().isoformat(),
             'data_points': len(traffic_data),
-            'latest_data': traffic_data[-3:] if traffic_data else [],
+            'latest_data': list(traffic_data)[-3:] if traffic_data else [],
             'predictions': {}
         }
         
@@ -3873,7 +3950,7 @@ def debug_gru_deep_check():
             },
             'data_state': {
                 'total_data_points': len(traffic_data),
-                'recent_data_sample': traffic_data[-3:] if traffic_data else [],
+                'recent_data_sample': list(traffic_data)[-3:] if traffic_data else [],
                 'data_features': list(traffic_data[-1].keys()) if traffic_data else []
             },
             'prediction_history': {
@@ -4236,7 +4313,11 @@ def reset_data():
             time.sleep(2)  # Wait for collection to stop
         
         # COMPLETELY clear ALL data variables and memory state
-        traffic_data = []
+        try:
+            traffic_data.clear()
+        except Exception:
+            traffic_data = deque(maxlen=240)
+        ensure_traffic_buffer_integrity()
         training_dataset = []
         predictions_history = {'gru': [], 'holt_winters': []}
         
@@ -4714,6 +4795,368 @@ def test_hw_metric():
             
     except Exception as e:
         logger.error(f"🔧 DEBUG: Test HW metric failed: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# =====================================================================
+# BASELINE DATASET MANAGEMENT ENDPOINTS
+# =====================================================================
+
+@app.route('/api/baseline/load', methods=['POST'])
+def load_baseline_dataset():
+    """
+    Load a pre-collected baseline dataset into the autoscaler
+    
+    Body: {"scenario": "low"|"medium"|"high"}
+    
+    This endpoint:
+    1. Clears all existing traffic data and predictions
+    2. Loads the specified baseline dataset
+    3. Resets all models to untrained state
+    4. Prepares the system for testing with consistent baseline data
+    """
+    global traffic_data, training_dataset, predictions_history, gru_mse, holt_winters_mse
+    global is_model_trained, gru_model, last_training_time
+    
+    try:
+        from baseline_datasets import BaselineDatasetManager
+        
+        data = request.get_json()
+        scenario = data.get('scenario', '').lower()
+        
+        if scenario not in ['low', 'medium', 'high']:
+            return jsonify({
+                'success': False,
+                'error': f"Invalid scenario: {scenario}. Must be 'low', 'medium', or 'high'"
+            }), 400
+        
+        logger.info(f"📊 Loading baseline dataset for scenario: {scenario}")
+        
+        # Load baseline data
+        manager = BaselineDatasetManager()
+        baseline_data = manager.load_baseline(scenario)
+        
+        # Clear existing data
+        traffic_data.clear()
+        training_dataset.clear()
+        predictions_history = {'gru': [], 'holt_winters': []}
+        
+        # Reset MSE values
+        gru_mse = float('inf')
+        holt_winters_mse = float('inf')
+        
+        # Reset model state
+        is_model_trained = False
+        gru_model = None
+        last_training_time = None
+        
+        # Load baseline traffic data into traffic_data deque
+        for point in baseline_data['traffic_data']:
+            traffic_data.append(point)
+        
+        # Also copy to training_dataset for model training
+        training_dataset = list(baseline_data['traffic_data'])
+        
+        # Save the loaded data
+        save_data()
+        save_predictions_history()
+        
+        logger.info(f"✅ Baseline dataset loaded: {len(traffic_data)} points from scenario '{scenario}'")
+        
+        return jsonify({
+            'success': True,
+            'scenario': scenario,
+            'data_points_loaded': len(traffic_data),
+            'collected_at': baseline_data['collected_at'],
+            'message': f"Baseline dataset '{scenario}' loaded successfully. All models reset.",
+            'next_steps': [
+                "Models are now untrained and ready for fresh training",
+                "Start your load test to collect new predictions",
+                "Or call /rebuild-model to train on baseline data"
+            ]
+        })
+        
+    except FileNotFoundError as e:
+        logger.error(f"Baseline dataset not found: {e}")
+        return jsonify({
+            'success': False,
+            'error': f"Baseline dataset for '{scenario}' not found. Please collect it first.",
+            'hint': "Use baseline_datasets.py collect --scenario <scenario> --duration 3600"
+        }), 404
+    except Exception as e:
+        logger.error(f"Failed to load baseline dataset: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/baseline/list', methods=['GET'])
+def list_baseline_datasets():
+    """List all available baseline datasets"""
+    try:
+        from baseline_datasets import BaselineDatasetManager
+        
+        manager = BaselineDatasetManager()
+        baselines = manager.list_available_baselines()
+        
+        return jsonify({
+            'success': True,
+            'baselines': baselines,
+            'count': len(baselines)
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to list baselines: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/baseline/validate/<scenario>', methods=['GET'])
+def validate_baseline_dataset(scenario):
+    """Validate a baseline dataset"""
+    try:
+        from baseline_datasets import BaselineDatasetManager
+        
+        manager = BaselineDatasetManager()
+        validation = manager.validate_baseline(scenario)
+        
+        return jsonify({
+            'success': True,
+            'validation': validation
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to validate baseline: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/baseline/clear', methods=['POST'])
+def clear_all_data():
+    """
+    Clear all traffic data and reset autoscaler to clean state
+    
+    This is called BEFORE starting baseline collection to ensure no old data interferes.
+    """
+    global traffic_data, training_dataset, predictions_history, gru_mse, holt_winters_mse
+    global is_model_trained, gru_model, last_training_time, data_collection_complete
+    
+    try:
+        logger.info("🗑️ Clearing all data and resetting autoscaler...")
+        
+        # Clear all data structures
+        traffic_data.clear()
+        training_dataset.clear()
+        predictions_history = {'gru': [], 'holt_winters': []}
+        
+        # Reset MSE values
+        gru_mse = float('inf')
+        holt_winters_mse = float('inf')
+        
+        # Reset model state
+        is_model_trained = False
+        gru_model = None
+        last_training_time = None
+        data_collection_complete = False
+        
+        # Save empty state to disk
+        save_data()
+        save_predictions_history()
+        
+        logger.info("✅ All data cleared and autoscaler reset to clean state")
+        
+        return jsonify({
+            'success': True,
+            'message': 'All data cleared successfully. Ready for fresh baseline collection.',
+            'cleared': {
+                'traffic_data': True,
+                'training_dataset': True,
+                'predictions_history': True,
+                'model_state': True,
+                'mse_values': True
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to clear data: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+        
+    except Exception as e:
+        logger.error(f"Failed to validate baseline: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/baseline/delete/<scenario>', methods=['DELETE'])
+def delete_baseline_dataset(scenario):
+    """Delete a baseline dataset"""
+    try:
+        from baseline_datasets import BaselineDatasetManager
+        
+        manager = BaselineDatasetManager()
+        manager.delete_baseline(scenario)
+        
+        return jsonify({
+            'success': True,
+            'message': f"Baseline dataset '{scenario}' deleted successfully"
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to delete baseline: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/baseline/save', methods=['POST'])
+def save_current_as_baseline():
+    """
+    Save current traffic_data as a baseline dataset
+    
+    Body: {"scenario": "low"|"medium"|"high"}
+    
+    This is called after collecting data during a load test to save it as a baseline.
+    """
+    global traffic_data
+    
+    try:
+        from baseline_datasets import BaselineDatasetManager
+        
+        data = request.get_json()
+        scenario = data.get('scenario', '').lower()
+        
+        if scenario not in ['low', 'medium', 'high']:
+            return jsonify({
+                'success': False,
+                'error': f"Invalid scenario: {scenario}. Must be 'low', 'medium', or 'high'"
+            }), 400
+        
+        if len(traffic_data) < 100:
+            return jsonify({
+                'success': False,
+                'error': 'Insufficient data to save as baseline',
+                'current_points': len(traffic_data),
+                'required_points': 100
+            }), 400
+        
+        logger.info(f"💾 Saving current data as baseline for scenario: {scenario}")
+        
+        # Convert deque to list
+        traffic_data_list = list(traffic_data)
+        
+        # Save as baseline
+        manager = BaselineDatasetManager()
+        metadata = {
+            'source': 'autoscaler',
+            'saved_from_running_system': True
+        }
+        
+        filepath = manager.save_baseline(scenario, traffic_data_list, metadata)
+        
+        return jsonify({
+            'success': True,
+            'scenario': scenario,
+            'data_points_saved': len(traffic_data_list),
+            'filepath': filepath,
+            'message': f"Current data saved as baseline dataset '{scenario}'"
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to save baseline: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# =====================================================================
+# MODEL VARIANTS ENDPOINTS
+# =====================================================================
+
+@app.route('/api/models/list', methods=['GET'])
+def list_available_models():
+    """List all available model types"""
+    from model_variants import MODEL_TYPES
+    
+    return jsonify({
+        'success': True,
+        'models': MODEL_TYPES,
+        'count': len(MODEL_TYPES)
+    })
+
+@app.route('/api/models/train/<model_name>', methods=['POST'])
+def train_specific_model(model_name):
+    """Train a specific model variant on current data"""
+    global traffic_data, training_dataset
+    
+    try:
+        from model_variants import initialize_model_registry
+        
+        if len(traffic_data) < 200:
+            return jsonify({
+                'success': False,
+                'error': 'Insufficient data for training',
+                'current_points': len(traffic_data),
+                'required_points': 200
+            }), 400
+        
+        # Initialize registry if not already done
+        registry = initialize_model_registry()
+        
+        # Get the model
+        model = registry.get_model(model_name)
+        if model is None:
+            return jsonify({
+                'success': False,
+                'error': f"Model '{model_name}' not found",
+                'available_models': registry.list_models()
+            }), 404
+        
+        # Convert traffic_data to list format for training
+        data_list = list(traffic_data) if training_dataset else list(traffic_data)
+        
+        # Train the model
+        logger.info(f"Training {model_name} with {len(data_list)} data points...")
+        result = model.train(data_list)
+        
+        # Save the model
+        if result.get('success'):
+            registry.save_all_models()
+        
+        return jsonify({
+            'success': result.get('success', False),
+            'model_name': model_name,
+            'training_result': result
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to train {model_name}: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/models/train_all', methods=['POST'])
+def train_all_models():
+    """Train all model variants on current data"""
+    global traffic_data, training_dataset
+    
+    try:
+        from model_variants import initialize_model_registry
+        
+        if len(traffic_data) < 200:
+            return jsonify({
+                'success': False,
+                'error': 'Insufficient data for training',
+                'current_points': len(traffic_data),
+                'required_points': 200
+            }), 400
+        
+        # Initialize registry
+        registry = initialize_model_registry()
+        
+        # Convert data
+        data_list = list(training_dataset) if training_dataset else list(traffic_data)
+        
+        # Train all models
+        logger.info(f"Training all models with {len(data_list)} data points...")
+        results = registry.train_all_models(data_list)
+        
+        # Save all models
+        registry.save_all_models()
+        
+        # Count successes
+        successful = sum(1 for r in results.values() if r.get('success'))
+        
+        return jsonify({
+            'success': True,
+            'models_trained': successful,
+            'total_models': len(results),
+            'results': results
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to train all models: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == '__main__':

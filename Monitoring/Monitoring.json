@@ -931,7 +931,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-hpa\", status_code=~\"2..\"}[5m])) / sum(rate(app_http_requests_total{app=\"product-app-hpa\"}[5m]))",
+          "expr": "sum(rate(load_tester_requests_total{exported_service=\"HPA\", outcome=\"success\"}[5m])) / sum(rate(load_tester_requests_total{exported_service=\"HPA\"}[5m]))",
           "legendFormat": "Success Rate",
           "range": true,
           "refId": "A"
@@ -942,7 +942,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-hpa\", status_code!~\"2..\"}[5m])) / sum(rate(app_http_requests_total{app=\"product-app-hpa\"}[5m]))",
+          "expr": "sum(rate(load_tester_requests_total{exported_service=\"HPA\", outcome=\"error\"}[5m])) / sum(rate(load_tester_requests_total{exported_service=\"HPA\"}[5m]))",
           "legendFormat": "Error Rate",
           "range": true,
           "refId": "B"
@@ -1071,7 +1071,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "(sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code=~\"2..\"}[5m])) / sum(rate(app_http_requests_total{app=\"product-app-combined\"}[5m]))) or on() vector(0)",
+          "expr": "(sum(rate(load_tester_requests_total{exported_service=\"Combined\", outcome=\"success\"}[5m])) / sum(rate(load_tester_requests_total{exported_service=\"Combined\"}[5m]))) or on() vector(0)",
           "legendFormat": "Success Rate",
           "range": true,
           "refId": "A"
@@ -1082,7 +1082,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "(sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code!~\"2..\"}[5m])) / sum(rate(app_http_requests_total{app=\"product-app-combined\"}[5m]))) or on() vector(0)",
+          "expr": "(sum(rate(load_tester_requests_total{exported_service=\"Combined\", outcome=\"error\"}[5m])) / sum(rate(load_tester_requests_total{exported_service=\"Combined\"}[5m]))) or on() vector(0)",
           "legendFormat": "Error Rate",
           "range": true,
           "refId": "B"
@@ -1210,8 +1210,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-hpa\", status_code=~\"2..\"}[1m]))",
-          "legendFormat": "Successful Requests (200)",
+          "expr": "sum(rate(load_tester_requests_total{exported_service=\"HPA\", outcome=\"success\"}[1m]))",
+          "legendFormat": "Successful Requests",
           "range": true,
           "refId": "A"
         },
@@ -1221,8 +1221,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-hpa\", status_code!~\"2..\"}[1m]))",
-          "legendFormat": "Error Requests (non-200)",
+          "expr": "sum(rate(load_tester_requests_total{exported_service=\"HPA\", outcome=\"error\"}[1m]))",
+          "legendFormat": "Error Requests",
           "range": true,
           "refId": "B"
         }
@@ -1349,8 +1349,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code=~\"2..\"}[1m])) or on() vector(0)",
-          "legendFormat": "Successful Requests (200)",
+          "expr": "sum(rate(load_tester_requests_total{exported_service=\"Combined\", outcome=\"success\"}[1m])) or on() vector(0)",
+          "legendFormat": "Successful Requests",
           "range": true,
           "refId": "A"
         },
@@ -1360,8 +1360,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(app_http_requests_total{app=\"product-app-combined\", status_code!~\"2..\"}[1m])) or on() vector(0)",
-          "legendFormat": "Error Requests (non-200)",
+          "expr": "sum(rate(load_tester_requests_total{exported_service=\"Combined\", outcome=\"error\"}[1m])) or on() vector(0)",
+          "legendFormat": "Error Requests",
           "range": true,
           "refId": "B"
         }
@@ -2348,8 +2348,8 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "load_tester_rps",
-          "legendFormat": "{{service}} RPS",
+          "expr": "sum by (service)(rate(load_tester_requests_total[1m]))",
+          "legendFormat": "{{service}} req/s",
           "range": true,
           "refId": "A"
         }

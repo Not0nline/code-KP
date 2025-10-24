@@ -1,0 +1,120 @@
+# =============================================================================
+# DOCUMENTATION FILES - Local use only (not committed)
+# =============================================================================
+RUN_THESE_COMMANDS_NOW.md
+PORT_FORWARD_FIX.md
+QUICK_FIX_SUMMARY.md
+BASELINE_COLLECTION_COMMANDS.md
+
+# Autoscaler documentation (local only)
+Autoscaler/README_TESTING.md
+Autoscaler/TESTING_GUIDE.md
+
+# Keep these (useful for project documentation):
+# TESTING.md
+# DATA_COLLECTION.md
+
+# =============================================================================
+# PYTHON
+# =============================================================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# =============================================================================
+# IDE
+# =============================================================================
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# =============================================================================
+# TEST RESULTS & LOGS
+# =============================================================================
+test_results/
+*.log
+load_test_results/
+baseline_*.log
+baseline_*.pid
+
+# =============================================================================
+# DATA FILES
+# =============================================================================
+# Model files (large files)
+*.h5
+*.pkl
+*.model
+*.weights
+
+# Data files (but keep config JSONs)
+*.csv
+# *.json  # Uncomment to ignore all JSON
+!package.json
+!package-lock.json
+!tsconfig.json
+
+# Baseline datasets (optional - uncomment if you don't want to commit them)
+# Autoscaler/baselines/*.json
+
+# =============================================================================
+# LOCAL ARTIFACTS
+# =============================================================================
+paper.txt
+load_test.log
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# =============================================================================
+# OS FILES
+# =============================================================================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# KUBERNETES
+# =============================================================================
+# Kubernetes secrets (never commit these!)
+*-secret.yaml
+secrets/
+
+# =============================================================================
+# DOCKER
+# =============================================================================
+.dockerignore
