@@ -235,6 +235,11 @@ class LoadTester:
         self.hpa_products = []
         self.combined_products = []
 
+        # Pod count tracking
+        self.hpa_pod_counts = []
+        self.combined_pod_counts = []
+        self.pod_tracking_lock = threading.Lock()
+
         # Create output directories
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, "patterns"), exist_ok=True)
@@ -820,6 +825,11 @@ class LoadTester:
         logger.info(f"Test started at {self.start_time.isoformat()}")
         logger.info(f"Testing endpoints with weights: {ENDPOINT_WEIGHTS}")
         
+        # Start pod count tracking thread
+        pod_tracker = threading.Thread(target=self.track_pod_counts, daemon=True)
+        pod_tracker.start()
+        logger.info("Started pod count tracking (sampling every 5 seconds)")
+        
         current_pattern_type = "NORMAL"
         rate_history = []
         
@@ -1034,6 +1044,15 @@ class LoadTester:
                 combined_req_count = len(self.combined_results)
                 combined_success = self.calculate_success_rate(self.combined_results)
         
+        # Calculate average pod counts
+        hpa_avg_pods = 0.0
+        combined_avg_pods = 0.0
+        with self.pod_tracking_lock:
+            if self.test_hpa and self.hpa_pod_counts:
+                hpa_avg_pods = sum(p['pod_count'] for p in self.hpa_pod_counts) / len(self.hpa_pod_counts)
+            if self.test_combined and self.combined_pod_counts:
+                combined_avg_pods = sum(p['pod_count'] for p in self.combined_pod_counts) / len(self.combined_pod_counts)
+        
         return {
             "start_time": self.start_time.isoformat(),
             "end_time": end_time.isoformat(),
@@ -1044,6 +1063,8 @@ class LoadTester:
             "combined_success_rate": combined_success,
             "hpa_products_created": len(self.hpa_products) if self.test_hpa else 0,
             "combined_products_created": len(self.combined_products) if self.test_combined else 0,
+            "hpa_avg_pods": round(hpa_avg_pods, 2),
+            "combined_avg_pods": round(combined_avg_pods, 2),
             "output_directory": self.output_dir
         }
 
@@ -1056,6 +1077,54 @@ class LoadTester:
             functional_requests = results
         successes = sum(1 for r in functional_requests if 200 <= r.get("status_code", 0) < 400)
         return successes / len(functional_requests)
+
+    def get_pod_count(self, deployment_name):
+        """Get the current number of ready pods for a deployment using kubectl."""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['kubectl', 'get', 'deployment', deployment_name, '-n', 'default', 
+                 '-o', 'jsonpath={.status.readyReplicas}'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return int(result.stdout.strip())
+            return 0
+        except Exception as e:
+            logger.warning(f"Failed to get pod count for {deployment_name}: {e}")
+            return 0
+
+    def track_pod_counts(self):
+        """Background thread to track pod counts every 5 seconds."""
+        while not self.stop_event.is_set():
+            try:
+                timestamp = datetime.now().isoformat()
+                elapsed = (datetime.now() - self.start_time).total_seconds()
+                
+                pod_data = {'timestamp': timestamp, 'elapsed_seconds': elapsed}
+                
+                if self.test_hpa:
+                    hpa_pods = self.get_pod_count('product-app-hpa')
+                    pod_data['hpa_pods'] = hpa_pods
+                
+                if self.test_combined:
+                    combined_pods = self.get_pod_count('product-app-combined')
+                    pod_data['combined_pods'] = combined_pods
+                
+                with self.pod_tracking_lock:
+                    if self.test_hpa:
+                        self.hpa_pod_counts.append({'timestamp': timestamp, 'elapsed_seconds': elapsed, 'pod_count': pod_data.get('hpa_pods', 0)})
+                    if self.test_combined:
+                        self.combined_pod_counts.append({'timestamp': timestamp, 'elapsed_seconds': elapsed, 'pod_count': pod_data.get('combined_pods', 0)})
+                
+                logger.debug(f"Pod counts at {elapsed:.0f}s: {pod_data}")
+                
+            except Exception as e:
+                logger.error(f"Error tracking pod counts: {e}")
+            
+            time.sleep(5)
 
     def save_partial_results(self, prefix):
         """Save partial results to disk."""
@@ -1094,6 +1163,17 @@ class LoadTester:
             if self.test_combined:
                 with open(os.path.join(self.output_dir, "combined_products.json"), 'w') as f:
                     json.dump(self.combined_products, f)
+            
+            # Save pod count tracking data
+            with self.pod_tracking_lock:
+                if self.test_hpa and self.hpa_pod_counts:
+                    hpa_pods_df = pd.DataFrame(self.hpa_pod_counts)
+                    hpa_pods_df.to_csv(os.path.join(self.output_dir, "hpa_pod_counts.csv"), index=False)
+                    logger.info(f"Saved HPA pod counts to {self.output_dir}/hpa_pod_counts.csv")
+                if self.test_combined and self.combined_pod_counts:
+                    combined_pods_df = pd.DataFrame(self.combined_pod_counts)
+                    combined_pods_df.to_csv(os.path.join(self.output_dir, "combined_pod_counts.csv"), index=False)
+                    logger.info(f"Saved Combined pod counts to {self.output_dir}/combined_pod_counts.csv")
             
             self.create_summary_statistics()
             self.save_request_rate_data()
@@ -1603,10 +1683,12 @@ def main():
             logger.info(f"Total HPA requests: {summary['hpa_requests']}")
             logger.info(f"HPA success rate: {summary['hpa_success_rate'] * 100:.2f}%")
             logger.info(f"HPA products created: {summary['hpa_products_created']}")
+            logger.info(f"HPA average pods: {summary['hpa_avg_pods']}")
         if test_combined:
             logger.info(f"Total Combined requests: {summary['combined_requests']}")
             logger.info(f"Combined success rate: {summary['combined_success_rate'] * 100:.2f}%")
             logger.info(f"Combined products created: {summary['combined_products_created']}")
+            logger.info(f"Combined average pods: {summary['combined_avg_pods']}")
         logger.info(f"Results saved to: {summary['output_directory']}")
         logger.info("==============================")
         logger.info("\nTo retrieve the results, run:")
