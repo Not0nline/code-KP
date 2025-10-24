@@ -60,8 +60,9 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: load-tester-monitor
+  namespace: default
   labels:
-    release: prometheus-stack
+    release: prometheus
 spec:
   selector:
     matchLabels:
