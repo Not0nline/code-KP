@@ -32,6 +32,11 @@ run_test_scenario() {
     # Step 1: Clean all services before test
     echo "🧹 Step 1: Cleaning all services..."
     
+    # Kill any existing load test processes
+    echo "   Stopping any existing load test processes..."
+    kubectl exec $LOAD_TESTER_POD -- pkill -f "python load_test.py" || true
+    sleep 5
+    
     # Reset product databases
     echo "   Resetting product databases..."
     kubectl exec deployment/product-app-hpa -- wget -q -O- --post-data='' http://localhost:5000/reset_data || echo "   ⚠️ HPA reset failed (might not have wget)"
@@ -56,7 +61,7 @@ except Exception as e:
     echo "🔄 Step 2: Running $scenario_upper test (30 minutes)..."
     local test_output_dir="$RESULTS_BASE/${scenario}_test"
     
-    kubectl exec -it $LOAD_TESTER_POD -- python load_test.py \
+    kubectl exec $LOAD_TESTER_POD -- python load_test.py \
         --scenario $scenario \
         --duration 1800 \
         --target both \
