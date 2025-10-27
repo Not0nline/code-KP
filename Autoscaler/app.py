@@ -5159,6 +5159,69 @@ def train_all_models():
         logger.error(f"Failed to train all models: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/reset_data', methods=['POST'])
+def reset_data():
+    """Reset all predictive models and training data"""
+    global traffic_data, training_dataset, gru_model, hw_model_hpa, hw_model_combined
+    global gru_scaler, gru_predictions, mse_buffer, current_mse, gru_ready_at
+    global prediction_thread_running, update_thread_running
+    
+    try:
+        logger.info("🧹 Resetting all predictive models and data...")
+        
+        # Reset data structures
+        traffic_data.clear()
+        if training_dataset:
+            training_dataset.clear()
+        
+        # Reset models
+        gru_model = None
+        hw_model_hpa = None
+        hw_model_combined = None
+        gru_scaler = None
+        
+        # Reset prediction buffers
+        gru_predictions.clear()
+        mse_buffer.clear()
+        current_mse = float('inf')
+        gru_ready_at = None
+        
+        # Reset model registry if available
+        try:
+            from model_variants import initialize_model_registry
+            registry = initialize_model_registry()
+            registry.reset_all_models()
+            logger.info("✅ Model registry reset")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not reset model registry: {e}")
+        
+        # Clear any saved model files
+        import glob
+        for model_file in glob.glob("/app/models/*.pkl") + glob.glob("/app/models/*.h5"):
+            try:
+                os.remove(model_file)
+                logger.info(f"🗑️ Removed model file: {model_file}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not remove {model_file}: {e}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'All predictive models and training data reset successfully',
+            'reset_components': [
+                'traffic_data',
+                'training_dataset', 
+                'gru_model',
+                'hw_models',
+                'prediction_buffers',
+                'model_registry',
+                'saved_model_files'
+            ]
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to reset predictive models: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 if __name__ == '__main__':
     # Initialize paper-based two-coroutine architecture
     logger.info("🚀 Starting predictive autoscaler with Paper-based Two-Coroutine Architecture...")

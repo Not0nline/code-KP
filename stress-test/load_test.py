@@ -1609,6 +1609,31 @@ def cleanup_product_databases():
     
     return success
 
+def cleanup_predictive_models():
+    """Clean up predictive models from the autoscaler service."""
+    logger.info("🧹 Cleaning up predictive models...")
+    
+    success = True
+    predictive_url = DEFAULT_PREDICTIVE_URL
+    
+    try:
+        reset_url = f"{predictive_url}/reset_data"
+        logger.info(f"Resetting predictive models: {reset_url}")
+        response = requests.post(reset_url, timeout=15)
+        if response.status_code == 200:
+            result = response.json()
+            logger.info(f"✅ Predictive models reset: {result.get('message', 'Success')}")
+            reset_components = result.get('reset_components', [])
+            logger.info(f"   🔄 Components reset: {', '.join(reset_components)}")
+        else:
+            logger.warning(f"⚠️ Predictive model reset returned status {response.status_code}: {response.text}")
+            success = False
+    except Exception as e:
+        logger.error(f"❌ Failed to reset predictive models: {e}")
+        success = False
+    
+    return success
+
 def create_control_api():
     """Create Flask API for controlling orchestrated test runs."""
     if not FLASK_AVAILABLE:
@@ -1755,6 +1780,14 @@ def create_control_api():
                                     logger.info("✅ Product databases cleaned successfully")
                                 else:
                                     logger.warning("⚠️ Failed to clean product databases")
+                                
+                                # Clean up predictive models after each iteration
+                                logger.info("Cleaning up predictive models...")
+                                model_cleanup_success = cleanup_predictive_models()
+                                if model_cleanup_success:
+                                    logger.info("✅ Predictive models cleaned successfully")
+                                else:
+                                    logger.warning("⚠️ Failed to clean predictive models")
                                 
                                 logger.info(f"Cooldown: {cooldown}s")
                                 time.sleep(cooldown)

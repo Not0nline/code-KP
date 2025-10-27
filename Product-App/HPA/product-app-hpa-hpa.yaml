@@ -11,16 +11,20 @@ spec:
   maxReplicas: 10
   behavior:
     scaleUp:
-      stabilizationWindowSeconds: 0
+      stabilizationWindowSeconds: 30  # Allow metrics to stabilize
       policies:
         - type: Percent
-          value: 100
-          periodSeconds: 15
+          value: 50    # Scale up by 50% instead of 100%
+          periodSeconds: 30
+        - type: Pods
+          value: 2     # Or add max 2 pods per 30s
+          periodSeconds: 30
+      selectPolicy: Min  # Use the more conservative policy
     scaleDown:
-      stabilizationWindowSeconds: 60
+      stabilizationWindowSeconds: 300  # Wait 5 min before scaling down
       policies:
         - type: Percent
-          value: 100
+          value: 25    # Scale down more conservatively
           periodSeconds: 60
   metrics:
   - type: Resource
@@ -28,4 +32,10 @@ spec:
       name: cpu
       target:
         type: Utilization
-        averageUtilization: 70
+        averageUtilization: 70  # Match Combined app's TARGET_CPU_UTILIZATION
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
