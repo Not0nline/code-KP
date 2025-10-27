@@ -1,44 +1,27 @@
 #!/bin/bash
-# Complete test restart: clean databases and start MEDIUM + HIGH tests
+# Start MEDIUM + HIGH tests
+# Database cleanup happens AUTOMATICALLY after each iteration
 # Results saved to /results/multi_run_results/ (persistent storage)
 
 set -e
 
 echo "========================================"
-echo "Complete Test Restart"
+echo "Starting MEDIUM + HIGH Tests"
 echo "========================================"
 echo ""
-
-# Step 1: Clean databases
-echo "Step 1/2: Cleaning product databases..."
-HPA_POD=$(kubectl get pod -l app=product-app-hpa -o jsonpath='{.items[0].metadata.name}')
-COMBINED_POD=$(kubectl get pod -l app=product-app-combined -o jsonpath='{.items[0].metadata.name}')
-
-if [ -n "$HPA_POD" ]; then
-    echo "  - Cleaning HPA database..."
-    kubectl exec $HPA_POD -- curl -s -X POST http://localhost:5000/reset_data
-fi
-
-if [ -n "$COMBINED_POD" ]; then
-    echo "  - Cleaning Combined database..."
-    kubectl exec $COMBINED_POD -- curl -s -X POST http://localhost:5000/reset_data
-fi
-
-echo "  ✅ Databases cleaned"
-echo ""
-
-# Step 2: Start tests
-echo "Step 2/2: Starting MEDIUM + HIGH tests..."
+echo "Configuration:"
 echo "  - MEDIUM: 10 iterations × 30 min"
 echo "  - HIGH:   10 iterations × 30 min"
 echo "  - Total:  ~10 hours"
-echo "  - Auto cleanup after each iteration"
+echo "  - Auto cleanup: ✅ (after each iteration)"
 echo ""
 
 # Get load-tester pod name
 POD_NAME=$(kubectl get pod -l app=load-tester -o name | sed 's/pod\///')
 echo "Using pod: $POD_NAME"
 echo ""
+
+echo "Starting tests..."
 kubectl exec $POD_NAME -- curl -X POST http://localhost:8080/start \
   -H 'Content-Type: application/json' \
   -d '{
