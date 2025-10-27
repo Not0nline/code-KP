@@ -14,7 +14,7 @@ spec:
       stabilizationWindowSeconds: 30  # Allow metrics to stabilize
       policies:
         - type: Percent
-          value: 50    # Scale up by 50% instead of 100%
+          value: 70    # Scale up by 70% instead of 100%
           periodSeconds: 30
         - type: Pods
           value: 2     # Or add max 2 pods per 30s
@@ -32,7 +32,7 @@ spec:
       name: cpu
       target:
         type: Utilization
-        averageUtilization: 70  # Match Combined app's TARGET_CPU_UTILIZATION
+        averageUtilization: 75  # Target 75% CPU (scales up when hits ~70% due to HPA behavior)
   - type: Resource
     resource:
       name: memory
