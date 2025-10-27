@@ -1569,6 +1569,46 @@ orchestrator_state = {
     "current_scenario": None,
 }
 
+def cleanup_product_databases():
+    """
+    Clean up product databases by calling reset endpoint on both HPA and Combined product apps.
+    Returns True if both cleanups succeeded, False otherwise.
+    """
+    hpa_url = CONFIG["HPA_URL"]
+    combined_url = CONFIG["COMBINED_URL"]
+    
+    success = True
+    
+    # Clean HPA product app
+    try:
+        reset_url = f"{hpa_url}/reset_data"
+        logger.info(f"Cleaning HPA database: {reset_url}")
+        response = requests.post(reset_url, timeout=10)
+        if response.status_code == 200:
+            logger.info(f"✅ HPA database cleaned: {response.json()}")
+        else:
+            logger.warning(f"⚠️ HPA cleanup returned status {response.status_code}: {response.text}")
+            success = False
+    except Exception as e:
+        logger.error(f"❌ Failed to clean HPA database: {e}")
+        success = False
+    
+    # Clean Combined product app
+    try:
+        reset_url = f"{combined_url}/reset_data"
+        logger.info(f"Cleaning Combined database: {reset_url}")
+        response = requests.post(reset_url, timeout=10)
+        if response.status_code == 200:
+            logger.info(f"✅ Combined database cleaned: {response.json()}")
+        else:
+            logger.warning(f"⚠️ Combined cleanup returned status {response.status_code}: {response.text}")
+            success = False
+    except Exception as e:
+        logger.error(f"❌ Failed to clean Combined database: {e}")
+        success = False
+    
+    return success
+
 def create_control_api():
     """Create Flask API for controlling orchestrated test runs."""
     if not FLASK_AVAILABLE:
@@ -1708,6 +1748,14 @@ def create_control_api():
                             })
 
                             if overall_iteration < total_iterations:
+                                # Clean up product databases after each iteration
+                                logger.info("Cleaning up product databases...")
+                                cleanup_success = cleanup_product_databases()
+                                if cleanup_success:
+                                    logger.info("✅ Product databases cleaned successfully")
+                                else:
+                                    logger.warning("⚠️ Failed to clean product databases")
+                                
                                 logger.info(f"Cooldown: {cooldown}s")
                                 time.sleep(cooldown)
                     

@@ -248,6 +248,38 @@ def health():
     # Quick health check - don't count against concurrent requests
     return jsonify({"status": "healthy"}), 200
 
+@app.route('/reset_data', methods=['POST'])
+def reset_data():
+    """Reset all product data - clear the in-memory database"""
+    global concurrent_requests
+    start_time = time.time()
+    endpoint_path = '/reset_data'
+    
+    try:
+        with products_lock:
+            products_before = len(products)
+            products.clear()
+            products_count.labels(app=app_type).set(0)
+        
+        with request_lock:
+            concurrent_requests = 0
+        
+        logger.info(f'{endpoint_path}: Database reset - cleared {products_before} products')
+        latency = time.time() - start_time
+        request_latency.labels(app=app_type, endpoint=endpoint_path).observe(latency)
+        
+        return jsonify({
+            'message': 'Database reset successfully',
+            'products_cleared': products_before,
+            'current_products': 0
+        }), 200
+        
+    except Exception as e:
+        logger.exception(f'{endpoint_path}: Error resetting database: {e}')
+        latency = time.time() - start_time
+        request_latency.labels(app=app_type, endpoint=endpoint_path).observe(latency)
+        return jsonify({'error': 'Failed to reset database'}), 500
+
 @app.route('/metrics', methods=['GET'])
 def metrics():
     # Expose Prometheus metrics
