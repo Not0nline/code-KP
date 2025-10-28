@@ -2,6 +2,7 @@
 
 # Comprehensive Test Suite - 10 iterations each for LOW, MEDIUM, HIGH scenarios
 # Workflow: Load model → Load dataset → Test → Save results → Clean dataset → Clean model → Repeat
+# This script runs INSIDE the Kubernetes cluster in the load-tester pod
 
 set -e
 
@@ -16,27 +17,47 @@ RESULTS_BASE="/results/comprehensive_test_${BASE_TIMESTAMP}"
 SSH_KEY="key_ta_2.pem"
 SSH_HOST="ubuntu@ec2-52-54-42-13.compute-1.amazonaws.com"
 LOAD_TESTER_POD="load-tester-7c987b969b-zt5tj"
+LOG_FILE="/results/comprehensive_test_${BASE_TIMESTAMP}.log"
+
+# Create comprehensive test script that runs INSIDE the pod
+create_pod_script() {
+    cat > /tmp/comprehensive_test_pod.sh << 'EOF'
+#!/bin/bash
+set -e
+
+# Configuration
+SCENARIOS=("low" "medium" "high")
+ITERATIONS=10
+DURATION=1800  # 30 minutes per test
+BASE_TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+RESULTS_BASE="/results/comprehensive_test_${BASE_TIMESTAMP}"
+LOG_FILE="/results/comprehensive_test_${BASE_TIMESTAMP}.log"
+
+# Redirect all output to both console and log file
+exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "=========================================="
 echo "COMPREHENSIVE TESTING SUITE STARTED"
 echo "=========================================="
 echo "Base timestamp: ${BASE_TIMESTAMP}"
 echo "Results directory: ${RESULTS_BASE}"
+echo "Log file: ${LOG_FILE}"
 echo "Scenarios: ${SCENARIOS[@]}"
 echo "Iterations per scenario: ${ITERATIONS}"
 echo "Duration per test: ${DURATION} seconds (30 minutes)"
+echo "Started at: $(date)"
 echo ""
 
-# Function to check test status
+# Function to check test status (local API call)
 check_test_status() {
-    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${SSH_HOST}" \
-        "kubectl exec ${LOAD_TESTER_POD} -- curl -s http://localhost:8080/status" 2>/dev/null
+    curl -s http://localhost:8080/status 2>/dev/null || echo '{"running": false}'
 }
 
 # Function to wait for test completion
 wait_for_test_completion() {
     local scenario=$1
     local iteration=$2
+    local start_time=$(date +%s)
     
     echo "Waiting for ${scenario} test iteration ${iteration} to complete..."
     
@@ -45,14 +66,19 @@ wait_for_test_completion() {
         running=$(echo "$status" | jq -r '.running // false')
         
         if [[ "$running" == "false" ]]; then
-            echo "Test completed!"
+            local end_time=$(date +%s)
+            local duration=$(( (end_time - start_time) / 60 ))
+            echo "Test completed in ${duration} minutes!"
             break
         fi
         
-        # Show progress every 2 minutes
-        current_scenario=$(echo "$status" | jq -r '.current_scenario // "unknown"')
-        echo "Still running: ${current_scenario} scenario..."
-        sleep 120
+        # Show progress every 5 minutes
+        local elapsed=$(( ($(date +%s) - start_time) / 60 ))
+        if (( elapsed % 5 == 0 )) && (( elapsed > 0 )); then
+            current_scenario=$(echo "$status" | jq -r '.current_scenario // "unknown"')
+            echo "[${elapsed}min] Still running: ${current_scenario} scenario..."
+        fi
+        sleep 60  # Check every minute
     done
 }
 
@@ -64,44 +90,30 @@ cleanup_between_tests() {
     echo "Cleaning up after ${scenario} iteration ${iteration}..."
     
     # Clean product databases
-    echo "Cleaning product databases..."
-    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${SSH_HOST}" \
-        "kubectl exec ${LOAD_TESTER_POD} -- curl -s -X POST http://localhost:8080/cleanup_databases" || true
+    echo "  → Cleaning product databases..."
+    local db_cleanup=$(curl -s -X POST http://localhost:8080/cleanup_databases 2>/dev/null || echo "failed")
+    echo "    Database cleanup result: ${db_cleanup}"
     
     # Clean predictive models
-    echo "Cleaning predictive models..."
-    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${SSH_HOST}" \
-        "kubectl exec ${LOAD_TESTER_POD} -- curl -s -X POST http://localhost:8080/cleanup_models" || true
+    echo "  → Cleaning predictive models..."
+    local model_cleanup=$(curl -s -X POST http://localhost:8080/cleanup_models 2>/dev/null || echo "failed")
+    echo "    Model cleanup result: ${model_cleanup}"
     
-    # Wait for cleanup to complete
-    sleep 30
+    # Wait for cleanup to settle
+    echo "  → Waiting 60 seconds for cleanup to settle..."
+    sleep 60
     
-    echo "Cleanup completed."
+    echo "  ✓ Cleanup completed."
 }
 
-# Function to load model and dataset
-load_model_and_dataset() {
+# Function to load model and dataset (handled automatically by start endpoint)
+prepare_for_test() {
     local scenario=$1
     local iteration=$2
     
-    echo "Loading model and dataset for ${scenario} iteration ${iteration}..."
-    
-    # Load the appropriate dataset for the scenario
-    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${SSH_HOST}" \
-        "kubectl exec ${LOAD_TESTER_POD} -- curl -s -X POST http://localhost:8080/load_dataset \
-        -H 'Content-Type: application/json' \
-        -d '{\"scenario\": \"${scenario}\"}'" || true
-    
-    # Train the model with the dataset
-    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${SSH_HOST}" \
-        "kubectl exec ${LOAD_TESTER_POD} -- curl -s -X POST http://localhost:8080/train_model \
-        -H 'Content-Type: application/json' \
-        -d '{\"scenario\": \"${scenario}\"}'" || true
-    
-    # Wait for training to complete
-    sleep 60
-    
-    echo "Model and dataset loaded for ${scenario}."
+    echo "Preparing for ${scenario} iteration ${iteration}..."
+    echo "  → Model and dataset will be loaded automatically when test starts"
+    echo "  ✓ Ready to start test"
 }
 
 # Function to start a test
@@ -111,20 +123,22 @@ start_test() {
     local output_dir="${RESULTS_BASE}/${scenario}_test/iteration_$(printf '%02d' $iteration)"
     
     echo "Starting ${scenario} test iteration ${iteration}..."
-    echo "Output directory: ${output_dir}"
+    echo "  → Output directory: ${output_dir}"
     
-    response=$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${SSH_HOST}" \
-        "kubectl exec ${LOAD_TESTER_POD} -- curl -s -X POST http://localhost:8080/start \
+    response=$(curl -s -X POST http://localhost:8080/start \
         -H 'Content-Type: application/json' \
-        -d '{
+        -d "{
             \"duration\": ${DURATION},
             \"target\": \"both\",
             \"scenario\": \"${scenario}\",
             \"test_predictive\": true,
             \"output_dir\": \"${output_dir}\"
-        }'")
+        }" 2>/dev/null || echo "failed to start")
     
-    echo "Test started. Response: ${response}"
+    echo "  ✓ Test started. Response: ${response}"
+    
+    # Brief pause to let test initialize
+    sleep 10
 }
 
 # Function to save and verify results
@@ -132,22 +146,41 @@ save_and_verify_results() {
     local scenario=$1
     local iteration=$2
     
-    echo "Saving and verifying results for ${scenario} iteration ${iteration}..."
+    echo "Verifying results for ${scenario} iteration ${iteration}..."
     
     # Get final status
     final_status=$(check_test_status)
-    echo "Final status: ${final_status}"
+    echo "  → Final status: ${final_status}"
     
     # Check if results were saved
-    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${SSH_HOST}" \
-        "find ${RESULTS_BASE}/${scenario}_test/iteration_$(printf '%02d' $iteration) -name '*.csv' | head -5" || true
+    local result_count=$(find ${RESULTS_BASE}/${scenario}_test/iteration_$(printf '%02d' $iteration) -name '*.csv' 2>/dev/null | wc -l || echo "0")
+    echo "  → Found ${result_count} CSV result files"
     
-    echo "Results saved and verified."
+    if [[ "$result_count" -gt 0 ]]; then
+        echo "  ✓ Results saved and verified."
+    else
+        echo "  ⚠️  Warning: No CSV files found in results directory"
+    fi
 }
 
 # Main execution loop
 total_tests=$((${#SCENARIOS[@]} * ITERATIONS))
 current_test=0
+
+echo "Creating results directory structure..."
+mkdir -p "${RESULTS_BASE}"
+for scenario in "${SCENARIOS[@]}"; do
+    mkdir -p "${RESULTS_BASE}/${scenario}_test"
+done
+
+# Wait for any existing test to complete first
+if [[ "$(echo "$(check_test_status)" | jq -r '.running // false')" == "true" ]]; then
+    echo "⚠️  Existing test detected, waiting for completion..."
+    wait_for_test_completion "existing" "test"
+    cleanup_between_tests "existing" "test"
+    echo "✓ Existing test completed, starting comprehensive suite"
+    echo ""
+fi
 
 for scenario in "${SCENARIOS[@]}"; do
     echo ""
@@ -161,10 +194,11 @@ for scenario in "${SCENARIOS[@]}"; do
         echo ""
         echo "==========================================";
         echo "TEST ${current_test}/${total_tests}: ${scenario^^} ITERATION ${iteration}"
+        echo "Time: $(date)"
         echo "=========================================="
         
-        # Step 1: Load model and dataset
-        load_model_and_dataset "$scenario" "$iteration"
+        # Step 1: Prepare for test
+        prepare_for_test "$scenario" "$iteration"
         
         # Step 2: Start the test
         start_test "$scenario" "$iteration"
@@ -172,7 +206,7 @@ for scenario in "${SCENARIOS[@]}"; do
         # Step 3: Wait for test completion
         wait_for_test_completion "$scenario" "$iteration"
         
-        # Step 4: Save and verify results
+        # Step 4: Verify results
         save_and_verify_results "$scenario" "$iteration"
         
         # Step 5: Clean up (except for the last test of the last scenario)
@@ -180,7 +214,7 @@ for scenario in "${SCENARIOS[@]}"; do
             cleanup_between_tests "$scenario" "$iteration"
         fi
         
-        echo "Completed ${scenario} iteration ${iteration} (Test ${current_test}/${total_tests})"
+        echo "✓ Completed ${scenario} iteration ${iteration} (Test ${current_test}/${total_tests})"
         
         # Brief pause between tests
         sleep 30
@@ -194,18 +228,104 @@ done
 
 echo ""
 echo "=========================================="
-echo "ALL COMPREHENSIVE TESTS COMPLETED!"
+echo "🎉 ALL COMPREHENSIVE TESTS COMPLETED!"
 echo "=========================================="
+echo "Completion time: $(date)"
 echo "Total tests run: ${total_tests}"
 echo "Results saved in: ${RESULTS_BASE}"
+echo "Log file: ${LOG_FILE}"
 echo ""
 
 # Generate final summary
 echo "Generating final summary..."
-ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${SSH_HOST}" \
-    "find ${RESULTS_BASE} -name 'api_summary.json' | wc -l" || true
-
-echo "Summary: Found $(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${SSH_HOST}" "find ${RESULTS_BASE} -name 'api_summary.json' | wc -l" 2>/dev/null || echo "0") completed test summaries"
+local csv_files=$(find ${RESULTS_BASE} -name '*.csv' 2>/dev/null | wc -l || echo "0")
+local json_files=$(find ${RESULTS_BASE} -name '*.json' 2>/dev/null | wc -l || echo "0")
+local summary_files=$(find ${RESULTS_BASE} -name 'api_summary.json' 2>/dev/null | wc -l || echo "0")
 
 echo ""
-echo "Comprehensive testing suite completed successfully!"
+echo "📊 Final Results Summary:"
+echo "  CSV files: ${csv_files}"
+echo "  JSON files: ${json_files}" 
+echo "  Test summaries: ${summary_files}"
+echo "  Total scenarios: ${#SCENARIOS[@]}"
+echo "  Iterations per scenario: ${ITERATIONS}"
+echo "  Expected total tests: ${total_tests}"
+echo ""
+
+# List sample result directories
+echo "📁 Sample result directories:"
+find ${RESULTS_BASE} -type d -name "*iteration*" | head -5
+
+echo ""
+echo "🏁 COMPREHENSIVE TESTING SUITE COMPLETED SUCCESSFULLY!"
+echo "All logs saved to: ${LOG_FILE}"
+
+EOF
+}
+
+# Main execution starts here
+echo "=========================================="
+echo "COMPREHENSIVE TEST DEPLOYMENT"
+echo "=========================================="
+echo "This will deploy and run 30 comprehensive tests in the cluster"
+echo "Tests will run in background inside the load-tester pod"
+echo ""
+
+# Check if current test is running and wait
+echo "Checking for any running tests..."
+current_status=$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${SSH_HOST}" \
+    "kubectl exec ${LOAD_TESTER_POD} -- curl -s http://localhost:8080/status" 2>/dev/null || echo '{"running": false}')
+
+current_running=$(echo "$current_status" | jq -r '.running // false')
+if [[ "$current_running" == "true" ]]; then
+    echo "⚠️  Test currently running. Waiting for completion..."
+    current_scenario=$(echo "$current_status" | jq -r '.current_scenario // "unknown"')
+    echo "Current test: ${current_scenario}"
+    
+    while [[ "$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${SSH_HOST}" \
+        "kubectl exec ${LOAD_TESTER_POD} -- curl -s http://localhost:8080/status" 2>/dev/null | \
+        jq -r '.running // false')" == "true" ]]; do
+        echo "Still waiting for current test to complete..."
+        sleep 60
+    done
+    echo "✓ Current test completed"
+fi
+
+echo ""
+echo "Deploying comprehensive test script to cluster..."
+
+# Create the pod script
+create_pod_script
+
+# Copy script to cluster and execute in background
+echo "Copying script to cluster and starting execution..."
+scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no /tmp/comprehensive_test_pod.sh "${SSH_HOST}:~/comprehensive_test_pod.sh"
+
+# Execute the script in background inside the pod
+ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${SSH_HOST}" \
+    "kubectl cp comprehensive_test_pod.sh ${LOAD_TESTER_POD}:/tmp/comprehensive_test_pod.sh && \
+     kubectl exec ${LOAD_TESTER_POD} -- chmod +x /tmp/comprehensive_test_pod.sh && \
+     kubectl exec -d ${LOAD_TESTER_POD} -- nohup /tmp/comprehensive_test_pod.sh > /dev/null 2>&1 &"
+
+echo ""
+echo "=========================================="
+echo "🚀 COMPREHENSIVE TESTS STARTED!"
+echo "=========================================="
+echo ""
+echo "✓ Script deployed to cluster"
+echo "✓ Tests running in background inside load-tester pod"
+echo "✓ You can safely close your laptop - tests will continue!"
+echo ""
+echo "📊 Test Plan:"
+echo "  • LOW: 10 iterations × 30 min = 5 hours"
+echo "  • MEDIUM: 10 iterations × 30 min = 5 hours"  
+echo "  • HIGH: 10 iterations × 30 min = 5 hours"
+echo "  • Total: 30 tests over ~15 hours"
+echo ""
+echo "📋 Monitor Progress:"
+echo "  Check status: ssh -i \"${SSH_KEY}\" ${SSH_HOST} \"kubectl exec ${LOAD_TESTER_POD} -- curl -s http://localhost:8080/status\""
+echo "  View logs: ssh -i \"${SSH_KEY}\" ${SSH_HOST} \"kubectl exec ${LOAD_TESTER_POD} -- tail -f /results/comprehensive_test_*.log\""
+echo ""
+echo "📁 Results will be saved to: /results/comprehensive_test_[timestamp]/"
+echo ""
+echo "🎯 Tests are now running autonomously in the cluster!"
