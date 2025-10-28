@@ -13,11 +13,39 @@ DURATION=1800  # 30 minutes per test
 BASE_TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 RESULTS_BASE="/results/comprehensive_test_${BASE_TIMESTAMP}"
 
-# SSH and Kubernetes configuration
-SSH_KEY="key_ta_2.pem"
+# SSH and Kubernetes configuration - Update path as needed
+SSH_KEY="key_ta_2.pem"  # Make sure this key is in current directory or provide full path
 SSH_HOST="ubuntu@ec2-52-54-42-13.compute-1.amazonaws.com"
 LOAD_TESTER_POD="load-tester-7c987b969b-zt5tj"
 LOG_FILE="/results/comprehensive_test_${BASE_TIMESTAMP}.log"
+
+# Function to check SSH connectivity
+check_ssh_connection() {
+    echo "Checking SSH connection and key..."
+    
+    # Check if key file exists
+    if [[ ! -f "$SSH_KEY" ]]; then
+        echo "❌ SSH key file '$SSH_KEY' not found in current directory"
+        echo "Please ensure the SSH key is available. Options:"
+        echo "1. Copy key_ta_2.pem to current directory"
+        echo "2. Update SSH_KEY variable in script with full path"
+        echo "3. Run from directory containing the key file"
+        return 1
+    fi
+    
+    # Test SSH connection
+    if ! ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$SSH_HOST" "echo 'SSH connection successful'" 2>/dev/null; then
+        echo "❌ Cannot connect to cluster via SSH"
+        echo "Please check:"
+        echo "1. SSH key permissions: chmod 600 $SSH_KEY"
+        echo "2. Network connectivity to $SSH_HOST"
+        echo "3. Key file is correct"
+        return 1
+    fi
+    
+    echo "✓ SSH connection successful"
+    return 0
+}
 
 # Create comprehensive test script that runs INSIDE the pod
 create_pod_script() {
@@ -271,7 +299,14 @@ echo "This will deploy and run 30 comprehensive tests in the cluster"
 echo "Tests will run in background inside the load-tester pod"
 echo ""
 
-# Check if current test is running and wait
+# Check SSH connection first
+if ! check_ssh_connection; then
+    echo ""
+    echo "❌ Cannot proceed without SSH connection to cluster"
+    exit 1
+fi
+
+echo ""
 echo "Checking for any running tests..."
 current_status=$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${SSH_HOST}" \
     "kubectl exec ${LOAD_TESTER_POD} -- curl -s http://localhost:8080/status" 2>/dev/null || echo '{"running": false}')
