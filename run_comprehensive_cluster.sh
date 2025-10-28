@@ -58,7 +58,9 @@ echo ""
 echo "Creating comprehensive test script..."
 
 # Create the comprehensive test script that runs inside the pod
-cat > /tmp/comprehensive_test_pod.sh << 'EOF'
+# Use current directory instead of /tmp to avoid permission issues
+SCRIPT_FILE="./comprehensive_test_pod.sh"
+cat > "$SCRIPT_FILE" << 'EOF'
 #!/bin/bash
 set -e
 
@@ -217,11 +219,13 @@ echo "All results saved to: $RESULTS_BASE"
 echo "Complete log available at: $LOG_FILE"
 EOF
 
-echo "✓ Test script created"
+EOF
+
+echo "✓ Test script created: $SCRIPT_FILE"
 
 echo ""
 echo "Copying script to load-tester pod..."
-kubectl cp /tmp/comprehensive_test_pod.sh $LOAD_TESTER_POD:/tmp/comprehensive_test_pod.sh
+kubectl cp "$SCRIPT_FILE" $LOAD_TESTER_POD:/tmp/comprehensive_test_pod.sh
 
 echo "Making script executable..."
 kubectl exec $LOAD_TESTER_POD -- chmod +x /tmp/comprehensive_test_pod.sh
@@ -279,4 +283,4 @@ echo "🎯 Tests are now running completely autonomously in the cluster!"
 echo "   The process will continue even if you disconnect."
 
 # Clean up temp file
-rm -f /tmp/comprehensive_test_pod.sh
+rm -f "$SCRIPT_FILE"
