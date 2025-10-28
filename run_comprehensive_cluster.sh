@@ -219,8 +219,6 @@ echo "All results saved to: $RESULTS_BASE"
 echo "Complete log available at: $LOG_FILE"
 EOF
 
-EOF
-
 echo "✓ Test script created: $SCRIPT_FILE"
 
 echo ""
