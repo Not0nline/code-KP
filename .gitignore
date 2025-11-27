@@ -127,9 +127,6 @@ paper_ieee
 need_bikin
 keys
 
-# Shell Scripts
-*.sh
-
 # Temporary files
 *.tmp
 *.temp
