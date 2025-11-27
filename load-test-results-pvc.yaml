@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: load-test-results-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce  # local-path only supports RWO
+  resources:
+    requests:
+      storage: 50Gi  # Enough for all test results
+  storageClassName: local-path  # K3s default storage class

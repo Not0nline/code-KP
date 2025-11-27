@@ -1,26 +1,61 @@
-# Kubernetes Autoscaling Setup - Reproduction Steps
+# 11-Model Predictive Kubernetes Autoscaling Research
 
-This README provides the steps to deploy the Kubernetes components for the autoscaling comparison project (Predictive, HPA, Combined), using Helm for Prometheus and Grafana installation.
+This repository contains a comprehensive implementation for comparing traditional HPA against an advanced 11-model predictive autoscaling system for Kubernetes. The research evaluates performance, cost efficiency, and quality-of-service tradeoffs across multiple forecasting approaches.
+
+## Research Overview
+
+- **Total Models**: 11 predictive models spanning 4 algorithmic paradigms
+- **Test Protocol**: 360 total tests (30 HPA baseline + 330 predictive model tests)  
+- **Infrastructure**: AWS K3s cluster with Prometheus monitoring
+- **Docker Images**: `4dri4l/predictive-scaler:v3.0-11models` with complete model suite
+
+## 11-Model Predictive System
+
+### Neural Networks (4 models)
+- **GRU**: Gated Recurrent Unit for complex temporal patterns
+- **LSTM**: Long Short-Term Memory for sequential data
+- **CNN**: Convolutional Neural Network for pattern recognition  
+- **Autoencoder**: Neural compression for anomaly detection
+
+### Statistical Models (2 models)  
+- **Holt-Winters**: Exponential smoothing with trend/seasonality
+- **ARIMA**: AutoRegressive Integrated Moving Average
+
+### Tree-Based Models (2 models)
+- **XGBoost**: Gradient boosting with feature engineering
+- **LightGBM**: Efficient gradient boosting for large datasets
+
+### Hybrid/Specialized Models (2 models)
+- **StatuScale**: Rule-based with burst detection (Hilman et al.)
+- **Prophet**: Facebook's business forecasting library
+
+### Meta-Model (1 model)
+- **Ensemble**: Weighted combination with dynamic selection
 
 ## Repository Structure
 
 ```text
 .
-├── Autoscaler/         # Predictive Scaler application & K8s manifests
-├── Monitoring/         # Monitoring setup (Grafana Dashboard JSON, example Service YAMLs) & K8s manifests
-│   ├── Monitoring.json     # Grafana Dashboard Import
-│   ├── allow-monitoring.yaml # Example NetworkPolicy
-│   ├── grafana/
-│   │   └── grafana-service.yaml # For exposing port externally for grafana
-│   └── prometheus/
-│       └── prometheus-service.yaml # For exposing port externally for prometheus
-├── Product-App/        # Product-App application & K8s manifests (including HPA and Combined setups)
-│   ├── app.py
-│   ├── Dockerfile
-│   ├── combination/
-│   ├── controller/
-│   └── hpa/
-└── stress-test/        # Load testing scripts, image, and K8s manifests
+├── Autoscaler/                    # 11-Model Predictive Scaler
+│   ├── app.py                     # Main application (11-model support)
+│   ├── model-config.yaml          # Model selection configuration  
+│   ├── advanced_models.py         # ARIMA, CNN, Autoencoder, Prophet, Ensemble
+│   ├── lstm_model.py             # LSTM implementation
+│   ├── tree_models.py            # XGBoost, LightGBM
+│   ├── statuscale_model.py       # StatuScale hybrid model
+│   ├── test_11_models.py         # Comprehensive test suite
+│   └── Dockerfile                # Multi-model container
+├── Monitoring/                    # Prometheus + Grafana setup
+├── Product-App/                   # Test application with HPA/Combined modes
+├── stress-test/                   # Load testing framework
+├── fixed_hpa_baseline_tests.sh    # HPA baseline test suite (30 tests)
+├── download_test_results.py       # Results collection utility  
+├── working_validation_test.sh     # System validation
+└── Research Context Files:
+    ├── paper.txt                  # Research paper content
+    ├── paper_context.txt          # Research context
+    ├── statuscale.txt             # StatuScale algorithm details  
+    └── time_series.txt            # Time-series forecasting theory
   ├── load_test.py                 # Load tester script (supports client metrics)
   ├── Dockerfile                   # Container image for auto-deployed load tester
   ├── requirements.txt             # Python deps for image
@@ -31,14 +66,38 @@ This README provides the steps to deploy the Kubernetes components for the autos
   └── load-test-servicemonitor.yaml# Legacy ServiceMonitor (metrics)
 ```
 
+## Research Methodology
+
+### Test Protocol
+- **360 Total Tests**: Comprehensive evaluation across all scenarios
+  - **30 HPA Baseline Tests**: Traditional reactive autoscaling
+  - **330 Predictive Tests**: 11 models × 3 scenarios × 10 iterations
+- **Test Duration**: 30 minutes each (total ~180 hours of testing)
+- **Load Scenarios**: 
+  - LOW: 50-150 RPS (baseline trickle traffic)
+  - MEDIUM: 150-350 RPS (moderate Poisson distribution)  
+  - HIGH: 350-600 RPS (intense Poisson with burst patterns)
+
+### Metrics Collected
+- **Cost Efficiency**: Pod count, pod-minutes, scaling events
+- **Quality of Service**: Success rate, response time percentiles
+- **Prediction Accuracy**: MSE, MAE, RMSE for each model
+- **Model Performance**: Training time, prediction latency
+
+### Infrastructure Requirements
+- **AWS K3s Cluster**: 4 nodes (1 master + 3 workers)
+- **Node Types**: t3.medium (master), t3.small (workers)  
+- **Storage**: Persistent volumes for results collection
+- **Monitoring**: Prometheus + Grafana for real-time metrics
+
 ## Prerequisites
 
-- A running Kubernetes cluster (Tested with K3s)
+- A running Kubernetes cluster (Tested with K3s on AWS)
 - `kubectl` configured to communicate with your cluster
 - `helm` v3 installed
-- Docker installed and running (if you need to build the container images)
+- Docker installed and running (if building images)
 - A StorageClass available in your cluster (e.g., `local-path` for K3s)
-- Internet access from your cluster nodes for Helm chart downloads and image pulls
+- Internet access from cluster nodes for Helm charts and image pulls
 
 ### Install Helm
 
@@ -205,7 +264,7 @@ Choose **ONE** of the following options:
 # Deploy Product App with HPA
 kubectl apply -f Product-App/HPA/product-app-hpa-service.yaml
 kubectl apply -f Product-App/HPA/product-app-hpa.yaml
-kubectl apply -f Product-App/HPA/product-app-hpa.yaml
+kubectl apply -f Product-App/HPA/product-app-hpa-hpa.yaml
 
 # Deploy ServiceMonitor (ensure it has 'release: prometheus' label)
 kubectl apply -f Product-App/HPA/product-app-servicemonitor.yaml -n monitoring
@@ -232,7 +291,89 @@ kubectl apply -f Product-App/Combination/product-app-combined-servicemonitor.yam
 kubectl apply -f Product-App/Combination/scaling-controller-combined.yaml
 ```
 
-### 7. Load Testing Options
+### 7. Restore Baseline Training Data (For Testing with Pre-trained Baselines)
+
+If you have backed up baseline training data from a previous cluster, you can restore it to skip the 12+ hour data collection process.
+
+**Prerequisites:**
+- Baseline backup file (e.g., `baseline_backup_YYYYMMDD_HHMMSS.tar.gz`)
+- Predictive scaler pod must be running with persistent volume mounted
+
+**Restore Steps:**
+
+1. **Upload baseline backup to cluster:**
+```bash
+scp -i "path/to/your-key.pem" baseline_backups/baseline_backup_*.tar.gz ubuntu@your-ec2-host:~/
+```
+
+2. **Extract and copy baselines to predictive-scaler pod:**
+```bash
+# SSH into your cluster
+ssh -i "path/to/your-key.pem" ubuntu@your-ec2-host
+
+# Get the predictive-scaler pod name
+PRED_POD=$(sudo kubectl get pods -l app=predictive-scaler -o jsonpath='{.items[0].metadata.name}')
+
+# Extract the backup
+tar -xzf baseline_backup_*.tar.gz
+
+# Copy each baseline file to the pod
+sudo kubectl cp baseline_low.json $PRED_POD:/data/baselines/
+sudo kubectl cp baseline_medium.json $PRED_POD:/data/baselines/
+sudo kubectl cp baseline_high.json $PRED_POD:/data/baselines/
+
+# Verify files are in place
+sudo kubectl exec $PRED_POD -- ls -lh /data/baselines/
+```
+
+3. **Copy required Python modules to predictive-scaler (if needed):**
+```bash
+# These modules are required for the baseline loading API
+sudo kubectl cp Autoscaler/baseline_datasets.py $PRED_POD:/app/
+sudo kubectl cp Autoscaler/model_variants.py $PRED_POD:/app/
+```
+
+4. **Verify baseline can be loaded via API:**
+```bash
+# Get predictive-scaler service port (usually 5000)
+sudo kubectl port-forward svc/predictive-scaler 5000:5000 &
+
+# Test loading a baseline
+curl -X POST http://localhost:5000/api/baseline/load \
+  -H "Content-Type: application/json" \
+  -d '{"scenario":"low"}'
+
+# Expected response: {"success": true, "data_points_loaded": 240, ...}
+```
+
+**PowerShell Script for Windows (Automated Restore):**
+
+Create `restore_baseline_local.ps1`:
+```powershell
+# Configuration
+$KeyPath = "C:\path\to\your-key.pem"
+$Host = "your-ec2-host.compute-1.amazonaws.com"
+$BackupFile = "baseline_backups\baseline_backup_*.tar.gz"
+
+# Upload backup
+Write-Host "Uploading baseline backup to cluster..."
+scp -i $KeyPath $BackupFile ubuntu@${Host}:~/
+
+# Restore baselines
+Write-Host "Restoring baselines to predictive-scaler pod..."
+ssh -i $KeyPath ubuntu@$Host @"
+  PRED_POD=\`$(sudo kubectl get pods -l app=predictive-scaler -o jsonpath='{.items[0].metadata.name}')\`
+  tar -xzf baseline_backup_*.tar.gz
+  sudo kubectl cp baseline_low.json \`$PRED_POD:/data/baselines/
+  sudo kubectl cp baseline_medium.json \`$PRED_POD:/data/baselines/
+  sudo kubectl cp baseline_high.json \`$PRED_POD:/data/baselines/
+  sudo kubectl exec \`$PRED_POD -- ls -lh /data/baselines/
+"@
+
+Write-Host "Baseline restore complete!"
+```
+
+### 8. Load Testing Options
 
 You can run load tests in two ways: Auto-deployed (recommended) or Legacy one-off pod.
 
@@ -292,7 +433,141 @@ kubectl delete -f stress-test/load-test-service.yaml --ignore-not-found
 kubectl delete -f stress-test/load-test-servicemonitor.yaml --ignore-not-found
 ```
 
-## Verification and Monitoring
+### 9. Running Automated Test Iterations
+
+After deploying the load-tester and restoring baseline data, you can run automated test iterations for data collection.
+
+**Prerequisites:**
+- Load-tester pod deployed and running
+- Baseline training data restored to predictive-scaler pod
+- Python modules (baseline_datasets.py, model_variants.py) copied to predictive-scaler pod
+
+**Running Test Iterations:**
+
+1. **Create test orchestration script** (save as `run_tests.sh`):
+```bash
+#!/bin/bash
+# Example: Run 10 iterations of high scenario tests
+
+SCENARIO="high"
+START_ITER=1
+END_ITER=10
+OUTPUT_BASE="/results/${SCENARIO}_$(date +%Y%m%d_%H%M%S)"
+
+echo "Running $SCENARIO scenario tests"
+echo "Iterations: $START_ITER to $END_ITER"
+echo "Output: $OUTPUT_BASE"
+
+for i in $(seq $START_ITER $END_ITER); do
+    echo "=== Starting iteration $i ==="
+    
+    # Load baseline dataset
+    curl -X POST http://predictive-scaler:5000/api/baseline/load \
+         -H "Content-Type: application/json" \
+         -d "{\"scenario\":\"$SCENARIO\"}"
+    
+    # Train models (~3-5 minutes)
+    curl -X POST http://predictive-scaler:5000/api/models/train_all
+    
+    # Submit test to Control API (30 minute test)
+    ITER_DIR="${OUTPUT_BASE}/iteration_$(printf '%02d' $i)"
+    curl -X POST http://localhost:8080/start \
+         -H "Content-Type: application/json" \
+         -d "{\"scenarios\":[\"$SCENARIO\"],\"duration\":1800,\"iterations\":1,\"output_dir\":\"$ITER_DIR\"}"
+    
+    # Wait for test completion
+    while true; do
+        STATUS=$(curl -s http://localhost:8080/status | grep -o '"running":[^,}]*')
+        if [[ "$STATUS" == *"false"* ]]; then
+            echo "Test completed!"
+            break
+        fi
+        echo "Test running..."
+        sleep 30
+    done
+    
+    echo "=== Iteration $i completed ==="
+    sleep 10
+done
+
+echo "ALL TESTS COMPLETED!"
+```
+
+2. **Copy script to load-tester pod and run as daemon:**
+```bash
+# Copy script to pod
+kubectl cp run_tests.sh load-tester-POD-NAME:/app/
+
+# Make executable
+kubectl exec load-tester-POD-NAME -- chmod +x /app/run_tests.sh
+
+# Create daemon launcher (start_tests.py)
+cat > start_tests.py << 'EOF'
+import subprocess
+import sys
+process = subprocess.Popen(
+    ['/bin/bash', '/app/run_tests.sh'],
+    stdout=open('/app/test_run.log', 'w'),
+    stderr=subprocess.STDOUT,
+    start_new_session=True
+)
+print(f"Started tests daemon with PID: {process.pid}")
+print(f"Log file: /app/test_run.log")
+sys.exit(0)
+EOF
+
+# Copy daemon launcher
+kubectl cp start_tests.py load-tester-POD-NAME:/app/
+
+# Start tests as background daemon
+kubectl exec load-tester-POD-NAME -- python3 /app/start_tests.py
+```
+
+3. **Monitor test progress:**
+```bash
+# Check daemon log
+kubectl exec load-tester-POD-NAME -- tail -f /app/test_run.log
+
+# Check Control API status
+kubectl exec load-tester-POD-NAME -- curl -s http://localhost:8080/status
+```
+
+4. **Download results after completion:**
+```bash
+# Create tar archive of all results
+kubectl exec load-tester-POD-NAME -- bash -c "cd /results && tar -czf /tmp/test_results.tar.gz high_*/"
+
+# Download to local machine
+kubectl cp load-tester-POD-NAME:/tmp/test_results.tar.gz ./test_results.tar.gz
+
+# Extract locally
+tar -xzf test_results.tar.gz
+```
+
+**PowerShell Automation (Windows):**
+
+```powershell
+# Configuration
+$KeyPath = "C:\path\to\your-key.pem"
+$Host = "your-ec2-host.compute-1.amazonaws.com"
+
+# Get load-tester pod name
+$PodName = ssh -i $KeyPath ubuntu@$Host "sudo kubectl get pods -l app=load-tester -o jsonpath='{.items[0].metadata.name}'"
+
+# Monitor tests
+Write-Host "Monitoring test progress (Ctrl+C to stop)..."
+while ($true) {
+    ssh -i $KeyPath ubuntu@$Host "sudo kubectl exec $PodName -- tail -20 /app/test_run.log"
+    Start-Sleep -Seconds 30
+}
+```
+
+**Test Duration Estimates:**
+- Each iteration: ~35 minutes (5 min model training + 30 min load test + overhead)
+- 10 iterations: ~6 hours
+- 3 scenarios (low/medium/high) × 10 iterations: ~18 hours total
+
+## 10. Verification and Monitoring
 
 ### Check Deployment Status
 

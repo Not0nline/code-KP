@@ -1,0 +1,19 @@
+# Model Selection Configuration - BASELINE TESTS
+# Only GRU + Holt-Winters for baseline comparison
+
+# BASELINE CONFIGURATION (Original Paper Models)
+models:
+  # BASELINE MODELS (Original Paper)
+  gru: true              # Original GRU neural network
+  holt_winters: true     # Holt-Winters exponential smoothing  
+  
+  # DISABLED FOR BASELINE
+  lstm: false            # LSTM neural network
+  lightgbm: false        # LightGBM gradient boosting
+  xgboost: false         # XGBoost gradient boosting
+  statuscale: false      # StatuScale rule-based algorithm
+  arima: false           # ARIMA statistical model
+  cnn: false             # CNN time series forecasting
+  autoencoder: false     # Neural autoencoder
+  prophet: false         # Facebook Prophet
+  ensemble: false        # Weighted ensemble of all models

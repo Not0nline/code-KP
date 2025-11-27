@@ -2,10 +2,22 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
+# Install system dependencies needed for LightGBM and XGBoost
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
+COPY baseline_datasets.py .
+COPY model_variants.py .
+COPY tree_models.py .
+COPY statuscale_model.py .
+COPY lstm_model.py .
+COPY advanced_models.py .
+COPY model-config.yaml .
 
 # Create directories for data persistence
 RUN mkdir -p /app/data

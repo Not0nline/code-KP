@@ -1,0 +1,69 @@
+# Model Selection Configuration
+# Edit this file to enable/disable models for experiments
+# After editing, rebuild Docker image and deploy
+
+# Enabled Models (true/false)
+# CURRENT EXPERIMENT: FULL 11-MODEL ENSEMBLE FOR RESEARCH PAPER
+models:
+  # BASIC MODELS (6 models)
+  gru: true              # Original GRU neural network
+  holt_winters: true     # Holt-Winters exponential smoothing  
+  lstm: true             # LSTM neural network ✅ ENABLED
+  lightgbm: true         # LightGBM gradient boosting ✅ ENABLED
+  xgboost: true          # XGBoost gradient boosting ✅ ENABLED
+  statuscale: true       # StatuScale rule-based algorithm ✅ ENABLED
+  
+  # ADVANCED MODELS (5 additional models)
+  arima: true            # ARIMA statistical model ✅ ENABLED
+  cnn: true              # CNN time series forecasting ✅ ENABLED
+  autoencoder: true      # Neural autoencoder ✅ ENABLED
+  prophet: true          # Facebook Prophet ✅ ENABLED
+  ensemble: true         # Weighted ensemble of all models ✅ ENABLED
+
+# Experiment Presets (uncomment ONE preset and comment others)
+# Then rebuild Docker image
+
+# Preset 1: Baseline (Original Paper)
+# models:
+#   gru: true
+#   holt_winters: true
+#   lstm: false
+#   lightgbm: false
+#   xgboost: false
+#   statuscale: false
+
+# Preset 2: Deep Learning Comparison
+# models:
+#   gru: true
+#   holt_winters: true
+#   lstm: true
+#   lightgbm: false
+#   xgboost: false
+#   statuscale: false
+
+# Preset 3: Tree-Based Models
+# models:
+#   gru: false
+#   holt_winters: true
+#   lstm: false
+#   lightgbm: true
+#   xgboost: true
+#   statuscale: false
+
+# Preset 4: StatuScale Test
+# models:
+#   gru: false
+#   holt_winters: true
+#   lstm: false
+#   lightgbm: false
+#   xgboost: false
+#   statuscale: true
+
+# Preset 5: Full Ensemble (All Models)
+# models:
+#   gru: true
+#   holt_winters: true
+#   lstm: true
+#   lightgbm: true
+#   xgboost: true
+#   statuscale: true

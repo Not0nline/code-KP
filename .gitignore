@@ -5,10 +5,27 @@ RUN_THESE_COMMANDS_NOW.md
 PORT_FORWARD_FIX.md
 QUICK_FIX_SUMMARY.md
 BASELINE_COLLECTION_COMMANDS.md
+INTEGRATION_COMPLETE.md
+FAIR_BASELINE_SETUP.md
+
+# Ignore all Markdown files as requested
+*.md
 
 # Autoscaler documentation (local only)
 Autoscaler/README_TESTING.md
 Autoscaler/TESTING_GUIDE.md
+
+# Test scripts (local only)
+check_test_progress.ps1
+run_all_tests.ps1
+deploy_and_test.ps1
+deploy_remote_and_test.ps1
+check_remote_progress.ps1
+
+# Test files (local only)
+Autoscaler/test_predictions.py
+Autoscaler/integration_test.py
+Autoscaler/quick_integration_test.py
 
 # Keep these (useful for project documentation):
 # TESTING.md
@@ -66,6 +83,10 @@ test_results/
 load_test_results/
 baseline_*.log
 baseline_*.pid
+/downloaded_results/
+/Downloads/
+/baseline_backups/
+/extracted_csv_backup/
 
 # =============================================================================
 # DATA FILES
@@ -91,6 +112,23 @@ baseline_*.pid
 # =============================================================================
 paper.txt
 load_test.log
+paper/
+context_notes.txt
+
+# Archives
+*.tar.gz
+*.tar
+*.zip
+*.ps1
+*.txt
+*.bak
+.gemini
+paper_ieee
+need_bikin
+keys
+
+# Shell Scripts
+*.sh
 
 # Temporary files
 *.tmp
@@ -118,3 +156,9 @@ secrets/
 # DOCKER
 # =============================================================================
 .dockerignore
+
+# =============================================================================
+# AGENT NOTES
+# =============================================================================
+@@*
+@*

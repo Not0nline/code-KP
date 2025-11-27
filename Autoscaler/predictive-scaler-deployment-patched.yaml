@@ -2,10 +2,9 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: predictive-scaler
-  namespace: default # Ensure namespace matches RBAC
+  namespace: default
 spec:
-  replicas: 1 # Usually only need one predictor instance
-  # Ensure only one pod during rollout to avoid duplicate metrics
+  replicas: 1
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -18,15 +17,12 @@ spec:
     metadata:
       labels:
         app: predictive-scaler
-      annotations:
-        last-updated: "20251124-010101"
     spec:
       terminationGracePeriodSeconds: 30
-      serviceAccountName: predictive-scaler-sa # <-- ADD THIS LINE
+      serviceAccountName: predictive-scaler-sa
       containers:
       - name: predictive-scaler
-        # Make sure image includes the kubernetes client library!
-        image: 4dri4l/predictive-scaler:v2.17-traffic-bypass # Use your actual image
+        image: 4dri4l/predictive-scaler:latest
         imagePullPolicy: Always
         ports:
         - name: http
@@ -35,21 +31,18 @@ spec:
         - configMapRef:
             name: product-app-scaling-thresholds
         env:
-        # Force single Gunicorn worker to keep Prometheus client single-process
         - name: GUNICORN_WORKERS
           value: "1"
         - name: APP_NAME
           value: "predictive-scaler"
-        # NEW: Env vars to configure the target for metrics collection
         - name: TARGET_NAMESPACE
-          value: "default" # Namespace of product-app-combined
+          value: "default"
         - name: TARGET_DEPLOYMENT
-          value: "product-app-combined" # Deployment to get metrics from
+          value: "product-app-combined"
         - name: TARGET_APP_LABEL
-          value: "product-app-combined" # Label used by product-app-combined pods
-        - name: PROMETHEUS_SERVER
-          value: "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
-        
+          value: "product-app-combined"
+        - name: PROMETHEUS_URL
+          value: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
         resources:
           requests:
             cpu: "100m"
@@ -57,21 +50,21 @@ spec:
           limits:
             cpu: "500m"
             memory: "1Gi"
-        readinessProbe: # Add probes
+        readinessProbe:
           httpGet:
             path: /health
             port: 5000
-          initialDelaySeconds: 60
+          initialDelaySeconds: 10
           periodSeconds: 10
-          timeoutSeconds: 10
+          timeoutSeconds: 3
           failureThreshold: 6
         livenessProbe:
           httpGet:
             path: /health
             port: 5000
-          initialDelaySeconds: 60
+          initialDelaySeconds: 20
           periodSeconds: 20
-          timeoutSeconds: 10
+          timeoutSeconds: 3
           failureThreshold: 6
         lifecycle:
           preStop:
@@ -80,7 +73,19 @@ spec:
         volumeMounts:
         - name: data-storage
           mountPath: /data
+        - name: code-volume
+          mountPath: /app/app.py
+          subPath: app.py
+        - name: debug-script-raw-volume
+          mountPath: /app/debug_traffic_raw.py
+          subPath: debug_traffic_raw.py
       volumes:
       - name: data-storage
         persistentVolumeClaim:
           claimName: predictive-scaler-pvc
+      - name: code-volume
+        configMap:
+          name: predictive-scaler-code
+      - name: debug-script-raw-volume
+        configMap:
+          name: debug-traffic-raw-cm

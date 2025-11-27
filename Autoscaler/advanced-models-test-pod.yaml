@@ -1,0 +1,339 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: advanced-models-test-pod
+  labels:
+    app: advanced-models-test
+spec:
+  containers:
+  - name: test-runner
+    image: python:3.9-slim
+    command: ["/bin/bash"]
+    args: ["-c", "while true; do sleep 30; done"]
+    env:
+    - name: AUTOSCALER_URL
+      value: "http://predictive-scaler:5000"
+    - name: PYTHONUNBUFFERED
+      value: "1"
+    workingDir: /workspace
+    volumeMounts:
+    - name: test-scripts
+      mountPath: /workspace
+    - name: results-volume
+      mountPath: /results
+  volumes:
+  - name: test-scripts
+    configMap:
+      name: advanced-models-test-scripts
+      defaultMode: 0755
+  - name: results-volume
+    persistentVolumeClaim:
+      claimName: load-test-results-pvc
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: advanced-models-test-scripts
+data:
+  requirements.txt: |
+    requests>=2.28.0
+    numpy>=1.22.0
+    pandas>=1.3.0
+    matplotlib>=3.5.0
+  
+  test_advanced_models.py: |
+    #!/usr/bin/env python3
+    """
+    Test Script for Advanced Models and Enhanced Metrics
+    Validates the implementation of research paper-based forecasting models
+    """
+    
+    import sys
+    import os
+    import time
+    import json
+    import requests
+    from datetime import datetime
+    
+    # Test configuration
+    BASE_URL = os.getenv('AUTOSCALER_URL', 'http://predictive-scaler:5000')
+    RESULTS_DIR = '/results/advanced_models_test'
+    
+    def ensure_results_dir():
+        """Create results directory"""
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        print(f"📁 Results directory: {RESULTS_DIR}")
+    
+    def log_result(test_name, result, details=None):
+        """Log test result to file"""
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_entry = {
+            'timestamp': timestamp,
+            'test': test_name,
+            'result': result,
+            'details': details or {}
+        }
+        
+        log_file = os.path.join(RESULTS_DIR, 'test_results.jsonl')
+        with open(log_file, 'a') as f:
+            f.write(json.dumps(log_entry) + '\n')
+    
+    def test_basic_connectivity():
+        """Test basic API connectivity"""
+        print("🔌 Testing basic connectivity...")
+        
+        try:
+            response = requests.get(f"{BASE_URL}/health", timeout=10)
+            if response.status_code == 200:
+                print("✅ Basic connectivity: OK")
+                log_result("connectivity", "SUCCESS", {"status_code": response.status_code})
+                return True
+            else:
+                print(f"❌ Health check failed: {response.status_code}")
+                log_result("connectivity", "FAILED", {"status_code": response.status_code})
+                return False
+        except Exception as e:
+            print(f"❌ Connection failed: {e}")
+            log_result("connectivity", "ERROR", {"error": str(e)})
+            return False
+    
+    def test_enhanced_metrics():
+        """Test enhanced metrics system"""
+        print("\n📊 Testing enhanced metrics system...")
+        
+        # Test metrics summary
+        try:
+            response = requests.get(f"{BASE_URL}/api/metrics/summary", timeout=10)
+            if response.status_code == 200:
+                summary = response.json()
+                print("✅ Metrics summary: Available")
+                log_result("metrics_summary", "SUCCESS", {
+                    "models_tracked": summary.get('system', {}).get('registered_models', 0),
+                    "total_predictions": summary.get('system', {}).get('total_predictions', 0)
+                })
+                
+                if 'system' in summary and 'performance' in summary:
+                    print(f"   📈 Registered models: {summary['system']['registered_models']}")
+                    print(f"   🎯 Total predictions: {summary['system']['total_predictions']}")
+                else:
+                    print("   ℹ️ Basic metrics (enhanced not available)")
+                    
+            else:
+                print(f"⚠️ Metrics summary failed: {response.status_code}")
+                log_result("metrics_summary", "FAILED", {"status_code": response.status_code})
+                
+        except Exception as e:
+            print(f"❌ Metrics test error: {e}")
+            log_result("metrics_summary", "ERROR", {"error": str(e)})
+    
+    def test_advanced_models_status():
+        """Test advanced models availability"""
+        print("\n🧠 Testing advanced models status...")
+        
+        try:
+            response = requests.get(f"{BASE_URL}/api/models/advanced/status", timeout=10)
+            if response.status_code == 200:
+                status = response.json()
+                print("✅ Advanced models status: Available")
+                
+                models_status = {}
+                if 'advanced_models' in status:
+                    models = status['advanced_models']
+                    for model_name, model_info in models.items():
+                        if isinstance(model_info, dict):
+                            available = model_info.get('available', False)
+                            enabled = model_info.get('enabled', False) 
+                            trained = model_info.get('trained', False)
+                            
+                            models_status[model_name] = {
+                                'available': available,
+                                'enabled': enabled, 
+                                'trained': trained
+                            }
+                            
+                            status_icon = "✅" if available else "❌"
+                            print(f"   {status_icon} {model_name}: available={available}, enabled={enabled}, trained={trained}")
+                else:
+                    print("   ⚠️ Advanced models not available")
+                
+                log_result("advanced_models_status", "SUCCESS", {"models": models_status})
+                return models_status
+                
+            else:
+                print(f"❌ Advanced models status failed: {response.status_code}")
+                log_result("advanced_models_status", "FAILED", {"status_code": response.status_code})
+                return {}
+                
+        except Exception as e:
+            print(f"❌ Advanced models test error: {e}")
+            log_result("advanced_models_status", "ERROR", {"error": str(e)})
+            return {}
+    
+    def test_model_training(model_name):
+        """Test training of specific advanced model"""
+        print(f"\n🔧 Testing {model_name} model training...")
+        
+        try:
+            response = requests.post(f"{BASE_URL}/api/models/advanced/train/{model_name}", timeout=120)
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('success'):
+                    training_time = result.get('training_time_ms', 0)
+                    data_points = result.get('data_points_used', 0)
+                    print(f"✅ {model_name} training: SUCCESS ({training_time:.2f}ms)")
+                    
+                    log_result(f"training_{model_name}", "SUCCESS", {
+                        "training_time_ms": training_time,
+                        "data_points_used": data_points
+                    })
+                    return True
+                else:
+                    error = result.get('error', 'Unknown error')
+                    print(f"❌ {model_name} training failed: {error}")
+                    log_result(f"training_{model_name}", "FAILED", {"error": error})
+                    return False
+            else:
+                print(f"❌ {model_name} training request failed: {response.status_code}")
+                log_result(f"training_{model_name}", "FAILED", {"status_code": response.status_code})
+                return False
+                
+        except Exception as e:
+            print(f"❌ {model_name} training error: {e}")
+            log_result(f"training_{model_name}", "ERROR", {"error": str(e)})
+            return False
+    
+    def test_model_prediction(model_name):
+        """Test prediction with specific advanced model"""
+        print(f"\n🎯 Testing {model_name} model prediction...")
+        
+        try:
+            payload = {"steps": 3}
+            response = requests.post(
+                f"{BASE_URL}/api/models/advanced/predict/{model_name}",
+                json=payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('success'):
+                    predictions = result.get('predictions', [])
+                    prediction_time = result.get('prediction_time_ms', 0)
+                    print(f"✅ {model_name} prediction: SUCCESS")
+                    print(f"   📊 Predictions: {predictions}")
+                    print(f"   ⏱️ Time: {prediction_time:.2f}ms")
+                    
+                    log_result(f"prediction_{model_name}", "SUCCESS", {
+                        "predictions": predictions,
+                        "prediction_time_ms": prediction_time,
+                        "steps": 3
+                    })
+                    return True
+                else:
+                    error = result.get('error', 'Unknown error')
+                    print(f"❌ {model_name} prediction failed: {error}")
+                    log_result(f"prediction_{model_name}", "FAILED", {"error": error})
+                    return False
+            else:
+                print(f"❌ {model_name} prediction request failed: {response.status_code}")
+                log_result(f"prediction_{model_name}", "FAILED", {"status_code": response.status_code})
+                return False
+                
+        except Exception as e:
+            print(f"❌ {model_name} prediction error: {e}")
+            log_result(f"prediction_{model_name}", "ERROR", {"error": str(e)})
+            return False
+    
+    def run_comprehensive_test():
+        """Run comprehensive test suite"""
+        print("🧪 Advanced Models Comprehensive Test Suite")
+        print("=" * 60)
+        print(f"🕒 Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"🌐 Testing URL: {BASE_URL}")
+        
+        ensure_results_dir()
+        
+        # Basic connectivity test
+        if not test_basic_connectivity():
+            print("❌ Cannot proceed - basic connectivity failed")
+            return False
+        
+        # Wait a moment for services to be ready
+        time.sleep(2)
+        
+        # Test enhanced metrics
+        test_enhanced_metrics()
+        
+        # Test advanced models status
+        models_status = test_advanced_models_status()
+        
+        # Test available models
+        models_to_test = ['arima', 'cnn', 'autoencoder', 'prophet', 'ensemble']
+        
+        results = {}
+        for model_name in models_to_test:
+            print(f"\n{'='*20} Testing {model_name.upper()} {'='*20}")
+            
+            # Try training
+            training_success = test_model_training(model_name)
+            
+            # Try prediction if training succeeded
+            prediction_success = False
+            if training_success:
+                time.sleep(1)  # Brief pause between training and prediction
+                prediction_success = test_model_prediction(model_name)
+            
+            results[model_name] = {
+                'training_success': training_success,
+                'prediction_success': prediction_success
+            }
+        
+        # Generate summary
+        print(f"\n📊 TEST SUMMARY")
+        print("=" * 50)
+        
+        total_models = len(results)
+        successful_training = sum(1 for r in results.values() if r['training_success'])
+        successful_predictions = sum(1 for r in results.values() if r['prediction_success'])
+        
+        print(f"Total models tested: {total_models}")
+        print(f"Successful training: {successful_training}/{total_models}")
+        print(f"Successful predictions: {successful_predictions}/{total_models}")
+        
+        # Save final summary
+        summary = {
+            'test_completed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'total_models_tested': total_models,
+            'successful_training': successful_training,
+            'successful_predictions': successful_predictions,
+            'individual_results': results
+        }
+        
+        summary_file = os.path.join(RESULTS_DIR, 'test_summary.json')
+        with open(summary_file, 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        print(f"\n✅ Test completed! Results saved to: {RESULTS_DIR}")
+        return True
+    
+    if __name__ == "__main__":
+        # Install dependencies
+        os.system("pip install -r requirements.txt")
+        
+        # Run tests
+        run_comprehensive_test()
+  
+  run_test.sh: |
+    #!/bin/bash
+    echo "🚀 Starting Advanced Models Test Suite..."
+    echo "📅 $(date)"
+    
+    # Install Python dependencies
+    pip install -r requirements.txt
+    
+    # Run the test
+    python test_advanced_models.py
+    
+    echo "✅ Test suite completed at $(date)"

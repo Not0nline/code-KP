@@ -1,0 +1,106 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: predictive-scaler-model-config
+  namespace: default
+data:
+  model-config.yaml: |
+    # Model Selection Configuration
+    models:
+      enabled:
+        gru: true
+        lstm: false
+        holt_winters: true
+        lightgbm: false
+        xgboost: false
+        statuscale: false
+      
+      priorities:
+        gru: 1
+        lstm: 2
+        holt_winters: 3
+        lightgbm: 4
+        xgboost: 5
+        statuscale: 6
+      
+      hyperparameters:
+        holt_winters:
+          slen: 12
+          look_forward: 24
+          look_backward: 60
+          alpha: 0.716
+          beta: 0.029
+          gamma: 0.993
+          debug: true
+          needTrain: false
+        
+        gru:
+          address: "/tmp/uds_socket"
+          resp_recv_address: "/tmp/rra.socket"
+          look_back: 100
+          look_forward: 24
+          train_size: 2000
+          batch_size: 10
+          epochs: 200
+          n_layers: 1
+          units: 50
+          dropout: 0.2
+          learning_rate: 0.001
+          debug: true
+          needTrain: true
+          preTrained: true
+        
+        lstm:
+          look_back: 100
+          look_forward: 24
+          train_size: 2000
+          batch_size: 10
+          epochs: 200
+          n_layers: 2
+          units: 50
+          dropout: 0.2
+          learning_rate: 0.001
+          debug: true
+          needTrain: true
+        
+        lightgbm:
+          look_back: 24
+          look_forward: 24
+          train_size: 2000
+          n_estimators: 100
+          max_depth: 7
+          learning_rate: 0.05
+          num_leaves: 31
+          debug: true
+          needTrain: true
+        
+        xgboost:
+          look_back: 24
+          look_forward: 24
+          train_size: 2000
+          n_estimators: 100
+          max_depth: 7
+          learning_rate: 0.05
+          subsample: 0.8
+          colsample_bytree: 0.8
+          debug: true
+          needTrain: true
+        
+        statuscale:
+          look_back: 30
+          look_forward: 24
+          train_size: 2000
+          threshold_high: 70
+          threshold_low: 30
+          window_size: 10
+          debug: true
+          needTrain: false
+    
+    mse_config:
+      enabled: true
+      min_samples_for_mse: 3
+      mse_window_size: 10
+      mse_threshold_difference: 0.5
+      prediction_match_tolerance_minutes: 5
+      max_prediction_age_hours: 2
+      debug_mse_matching: true

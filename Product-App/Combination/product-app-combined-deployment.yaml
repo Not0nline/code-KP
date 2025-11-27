@@ -11,6 +11,8 @@ spec:
     metadata:
       labels:
         app: product-app-combined
+      annotations:
+        last-updated: "20251124-010101"
     spec:
       containers:
       - name: product-app

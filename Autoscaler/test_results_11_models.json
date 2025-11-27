@@ -1,0 +1,68 @@
+{
+  "timestamp": "2025-11-14T13:38:42.414346",
+  "test_data_points": 500,
+  "basic_models": {
+    "gru": {
+      "tested": false,
+      "reason": "Complex UDS socket setup required"
+    },
+    "holt_winters": {
+      "tested": true,
+      "prediction": 206.0172783292028,
+      "status": "WORKING"
+    },
+    "lstm": {
+      "tested": true,
+      "prediction": 3,
+      "status": "WORKING"
+    },
+    "lightgbm": {
+      "tested": true,
+      "prediction": 5,
+      "status": "WORKING"
+    },
+    "xgboost": {
+      "tested": true,
+      "prediction": 5,
+      "status": "WORKING"
+    },
+    "statuscale": {
+      "tested": true,
+      "prediction": 5,
+      "status": "WORKING"
+    }
+  },
+  "advanced_models": {
+    "arima": {
+      "tested": true,
+      "prediction": 4.42060463009243,
+      "status": "WORKING"
+    },
+    "cnn": {
+      "tested": true,
+      "prediction": 2.1835004091262817,
+      "status": "WORKING"
+    },
+    "autoencoder": {
+      "tested": true,
+      "prediction": 1.7298510074615479,
+      "status": "WORKING"
+    },
+    "prophet": {
+      "tested": true,
+      "prediction": 4.06470895588513,
+      "status": "WORKING"
+    },
+    "ensemble": {
+      "tested": true,
+      "prediction": 4.0,
+      "status": "WORKING"
+    }
+  },
+  "summary": {
+    "total_models": 11,
+    "working": 10,
+    "failed": 0,
+    "skipped": 1
+  }
+}

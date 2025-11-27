@@ -641,7 +641,7 @@ def train_all_models_api():
                 'required_points': 200
             }), 400
         
-        registry = initialize_model_registry(config.get('models'), enabled_models)
+        registry = initialize_model_registry(config.get('models'))
         logger.info(f"Training all models with {len(training_dataset)} data points...")
         results = registry.train_all_models(training_dataset)
         registry.save_all_models()
@@ -845,6 +845,7 @@ def main_loop():
                                 })
                                 # Update metrics for every model
                                 predictive_scaler_recommended_replicas.labels(method=model_name).set(pred_replicas)
+                                predicted_load_gauge.labels(model=model_name).set(pred)
                                 if ENHANCED_METRICS_AVAILABLE:
                                     record_model_prediction(model_name, dur_ms, pred_replicas)
                         except Exception as e:
@@ -869,6 +870,7 @@ def main_loop():
                                     "actual": None
                             })
                             predictive_scaler_recommended_replicas.labels(method='holt_winters').set(pred_replicas)
+                            predicted_load_gauge.labels(model='holt_winters').set(predicted_load)
                             if ENHANCED_METRICS_AVAILABLE:
                                 record_model_prediction('holt_winters', dur_ms, pred_replicas)
                      except Exception as e:

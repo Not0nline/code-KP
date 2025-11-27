@@ -12,6 +12,8 @@ spec:
     metadata:
       labels:
         app: scaling-controller-combined
+      annotations:
+        last-updated: "20251124-010101"
     spec:
       serviceAccountName: scaling-controller-sa  # CHANGED!
       containers:

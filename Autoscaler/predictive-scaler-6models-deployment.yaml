@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: predictive-scaler-6models
+  labels:
+    app: predictive-scaler-6models
+    variant: sixmodels
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: predictive-scaler-6models
+  template:
+    metadata:
+      labels:
+        app: predictive-scaler-6models
+        variant: sixmodels
+    spec:
+      serviceAccountName: predictive-scaler
+      containers:
+      - name: predictive-scaler
+        image: 4dri4l/predictive-scaler:v3.0-6models-full
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 5000
+        env:
+        - name: GUNICORN_WORKERS
+          value: "1"
+        - name: APP_NAME
+          value: "predictive-scaler-6models"
+        - name: TARGET_NAMESPACE
+          value: "default"
+        - name: TARGET_DEPLOYMENT
+          value: "product-app-6models"
+        - name: TARGET_APP_LABEL
+          value: "product-app-6models"
+        - name: PROMETHEUS_URL
+          value: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+        envFrom:
+        - configMapRef:
+            name: product-app-scaling-thresholds
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 20
+          periodSeconds: 20
+          failureThreshold: 6
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 6
+        volumeMounts:
+        - name: data-storage
+          mountPath: /data
+      volumes:
+      - name: data-storage
+        persistentVolumeClaim:
+          claimName: predictive-scaler-6models-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: predictive-scaler-6models
+  labels:
+    app: predictive-scaler-6models
+spec:
+  selector:
+    app: predictive-scaler-6models
+  ports:
+  - port: 5000
+    targetPort: 5000
+    protocol: TCP
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: predictive-scaler-6models-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

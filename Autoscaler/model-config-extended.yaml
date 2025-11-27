@@ -1,0 +1,73 @@
+# Model Configuration for Kubernetes Autoscaler
+# Based on "Time series big data: a survey on data stream frameworks, analysis and algorithms"
+# Enable/disable different forecasting models
+
+# Core models (always available)
+gru:
+  enabled: true
+  description: "Gated Recurrent Unit - Neural network for sequence learning"
+  
+holt_winters:
+  enabled: true
+  description: "Triple exponential smoothing - Statistical method with seasonality"
+
+# Traditional ML models
+lstm:
+  enabled: false
+  description: "Long Short-Term Memory - Neural network for long sequences"
+  
+lightgbm:
+  enabled: false
+  description: "Light Gradient Boosting Machine - Tree-based ensemble"
+  
+xgboost:
+  enabled: false
+  description: "Extreme Gradient Boosting - Tree-based ensemble"
+  
+# Hybrid models
+statuscale:
+  enabled: false
+  description: "Rule-based hybrid model - No training required"
+
+# Advanced models from research paper
+arima:
+  enabled: false
+  description: "AutoRegressive Integrated Moving Average - Statistical model"
+  dependencies: ["statsmodels"]
+  
+cnn:
+  enabled: false
+  description: "Convolutional Neural Network - Deep learning for patterns"
+  dependencies: ["tensorflow", "keras"]
+  
+autoencoder:
+  enabled: false
+  description: "Autoencoder-based forecasting - Feature learning"
+  dependencies: ["tensorflow", "keras"]
+  
+prophet:
+  enabled: false
+  description: "Facebook Prophet - Hybrid statistical/ML with seasonality"
+  dependencies: ["prophet"]
+  
+ensemble:
+  enabled: false
+  description: "Ensemble of multiple models - Weighted predictions"
+  depends_on: ["gru", "arima", "prophet"]  # Requires at least these models
+
+# Model selection strategy
+selection:
+  strategy: "min_heap"  # Options: "min_heap", "ensemble", "round_robin"
+  fallback_model: "gru"
+  min_data_points: 50
+  
+# Performance thresholds
+performance:
+  mse_threshold: 1.0
+  training_timeout_seconds: 300
+  prediction_timeout_seconds: 30
+  
+# Resource limits
+resources:
+  max_memory_mb: 1024
+  max_training_time_minutes: 10

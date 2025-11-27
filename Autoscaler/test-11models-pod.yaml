@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: predictive-scaler-test-11models
+  namespace: default
+  labels:
+    app: predictive-scaler-test
+    version: v3.0-11models
+spec:
+  containers:
+  - name: predictive-scaler
+    image: 4dri4l/predictive-scaler:v3.0-11models
+    ports:
+    - containerPort: 8080
+    env:
+    - name: MODEL_CONFIG_PATH
+      value: "/app/model-config.yaml"
+    - name: PYTHONUNBUFFERED
+      value: "1"
+    - name: TEST_MODE
+      value: "true"
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "1Gi" 
+        cpu: "500m"
+    volumeMounts:
+    - name: data-storage
+      mountPath: /app/data
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: 8080
+      initialDelaySeconds: 30
+      periodSeconds: 10
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: 8080
+      initialDelaySeconds: 60
+      periodSeconds: 30
+  volumes:
+  - name: data-storage
+    emptyDir: {}
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: ip-172-31-22-167  # Master node for testing

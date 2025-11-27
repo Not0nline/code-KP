@@ -1,0 +1,92 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"batch/v1","kind":"Job","metadata":{"annotations":{},"name":"load-test-quick-1","namespace":"default"},"spec":{"backoffLimit":0,"template":{"spec":{"containers":[{"args":["--target","combined","--scenario","high","--duration","180","--output-dir","/results","--max-concurrency","96","--timeout","60"],"command":["python3","load_test.py"],"image":"4dri4l/load-tester:latest","imagePullPolicy":"Always","name":"load-test","volumeMounts":[{"mountPath":"/results","name":"results"}]}],"restartPolicy":"Never","volumes":[{"name":"results","persistentVolumeClaim":{"claimName":"load-test-results-pvc"}}]}}}}
+  creationTimestamp: "2025-11-10T01:55:04Z"
+  generation: 1
+  labels:
+    batch.kubernetes.io/controller-uid: 1f0a2815-7fdd-4c3b-bde1-f2bf45753d1a
+    batch.kubernetes.io/job-name: load-test-quick-1
+    controller-uid: 1f0a2815-7fdd-4c3b-bde1-f2bf45753d1a
+    job-name: load-test-quick-1
+  name: load-test-quick-1
+  namespace: default
+  resourceVersion: "311608"
+  uid: 1f0a2815-7fdd-4c3b-bde1-f2bf45753d1a
+spec:
+  backoffLimit: 0
+  completionMode: NonIndexed
+  completions: 1
+  manualSelector: false
+  parallelism: 1
+  podReplacementPolicy: TerminatingOrFailed
+  selector:
+    matchLabels:
+      batch.kubernetes.io/controller-uid: 1f0a2815-7fdd-4c3b-bde1-f2bf45753d1a
+  suspend: false
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        batch.kubernetes.io/controller-uid: 1f0a2815-7fdd-4c3b-bde1-f2bf45753d1a
+        batch.kubernetes.io/job-name: load-test-quick-1
+        controller-uid: 1f0a2815-7fdd-4c3b-bde1-f2bf45753d1a
+        job-name: load-test-quick-1
+    spec:
+      containers:
+      - args:
+        - --target
+        - combined
+        - --scenario
+        - high
+        - --duration
+        - "180"
+        - --output-dir
+        - /results
+        - --max-concurrency
+        - "96"
+        - --timeout
+        - "60"
+        command:
+        - python3
+        - load_test.py
+        image: 4dri4l/load-tester:latest
+        imagePullPolicy: Always
+        name: load-test
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /results
+          name: results
+      dnsPolicy: ClusterFirst
+      restartPolicy: Never
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: results
+        persistentVolumeClaim:
+          claimName: load-test-results-pvc
+status:
+  completionTime: "2025-11-10T01:58:17Z"
+  conditions:
+  - lastProbeTime: "2025-11-10T01:58:17Z"
+    lastTransitionTime: "2025-11-10T01:58:17Z"
+    message: Reached expected number of succeeded pods
+    reason: CompletionsReached
+    status: "True"
+    type: SuccessCriteriaMet
+  - lastProbeTime: "2025-11-10T01:58:17Z"
+    lastTransitionTime: "2025-11-10T01:58:17Z"
+    message: Reached expected number of succeeded pods
+    reason: CompletionsReached
+    status: "True"
+    type: Complete
+  ready: 0
+  startTime: "2025-11-10T01:55:04Z"
+  succeeded: 1
+  terminating: 0
+  uncountedTerminatedPods: {}

@@ -1,7 +1,7 @@
 Flask>=2.0.1
 numpy>=1.22.0
 pandas>=1.3.0
-tensorflow>=2.13.0
+tensorflow==2.13.0
 statsmodels>=0.13.0
 gunicorn>=20.1.0
 Werkzeug>=2.0.3
@@ -13,5 +13,14 @@ joblib>=1.1.0
 typing-extensions>=3.6.6
 kubernetes>=26.1.0
 xgboost>=1.7.0
-catboost>=1.2.0
 lightgbm>=3.3.0
+catboost>=1.2.0
+PyYAML>=6.0
+
+# Advanced models from research paper
+prophet>=1.1.4
+scipy>=1.9.0
+matplotlib>=3.5.0
+
+# Enhanced metrics (dataclasses is built-in for Python 3.7+)
+# dataclasses>=0.8  # Not needed for Python 3.9+
