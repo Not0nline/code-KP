@@ -105,7 +105,7 @@ for SCENARIO in "${SCENARIOS[@]}"; do
             --env="DURATION=1800" \
             --env="TEST_NAME=$TEST_NAME" \
             --env="TEST_PREDICTIVE=true" \
-            --command -- /bin/bash -c "python /app/load_test.py; echo 'TEST_FINISHED_MARKER'; sleep 3600"
+            --command -- /bin/bash -c "python /app/load_test.py; echo 'TEST_FINISHED_MARKER'; sleep 300"
 
         # Wait for completion (Log Check)
         echo "ΓÅ│ [Phase 7] Test running (30 mins)..."
