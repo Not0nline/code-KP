@@ -97,7 +97,7 @@ for SCENARIO in "${SCENARIOS[@]}"; do
         $SUDO_CMD kubectl delete pod $TEST_NAME --ignore-not-found=true --force --grace-period=0
         sleep 5
 
-        $SUDO_CMD kubectl run $TEST_NAME \
+        $SUDO_CMD kubectl run $TEST_NAME --labels="app=load-tester" \
             --image=4dri41/stress-test:latest \
             --restart=Never \
             --env="TARGET=$TARGET" \
