@@ -88,7 +88,7 @@ for SCENARIO in "${SCENARIOS[@]}"; do
         
         # --- STEP 5: WAIT FOR TRAINING ---
         echo "ΓÅ│ [Phase 5] Waiting 300s (5 mins) for training to complete..."
-        sleep 300
+        sleep 900
 
         # --- STEP 6: EXECUTE LOAD TEST ---
         echo "≡ƒöÑ [Phase 6] Launching Load Test Pod..."
