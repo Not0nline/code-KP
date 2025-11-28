@@ -68,9 +68,9 @@ for SCENARIO in "${SCENARIOS[@]}"; do
         fi
 
         # --- STEP 2: RESTART SCALER ---
-        echo "≡ƒöä [Phase 2] Restarting Scaler to load config..."
-        $SUDO_CMD kubectl rollout restart deployment predictive-scaler
-        $SUDO_CMD kubectl rollout status deployment predictive-scaler --timeout=180s
+        # echo "≡ƒöä [Phase 2] Restarting Scaler to load config..."
+        # $SUDO_CMD kubectl rollout restart deployment predictive-scaler
+        # $SUDO_CMD kubectl rollout status deployment predictive-scaler --timeout=180s
         
         # Get new pod name
         sleep 5
