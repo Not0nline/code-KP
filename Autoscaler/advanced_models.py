@@ -109,10 +109,10 @@ class ARIMAPredictor:
                 if isinstance(data[0], dict):
                     # Extract replicas values from data structure
                     for item in data:
-                        if isinstance(item, dict) and 'replicas' in item:
-                            numeric_data.append(float(item['replicas']))
-                        elif isinstance(item, dict) and 'traffic' in item:
+                        if isinstance(item, dict) and 'traffic' in item:
                             numeric_data.append(float(item['traffic']))
+                        elif isinstance(item, dict) and 'replicas' in item:
+                            numeric_data.append(float(item['replicas']))
                         else:
                             # Fallback: try to extract any numeric value
                             for key in ['cpu_utilization', 'requests_per_sec', 'load']:
@@ -241,6 +241,7 @@ class CNNPredictor:
     """
     
     def __init__(self, config=None):
+        self.model_type = 'cnn'
         self.config = config or {}
         # Set defaults
         defaults = {
@@ -414,6 +415,7 @@ class AutoencoderPredictor:
     """
     
     def __init__(self, config=None):
+        self.model_type = 'autoencoder'
         self.config = config or {}
         # Set defaults
         defaults = {
@@ -606,6 +608,7 @@ class ProphetPredictor:
     """
     
     def __init__(self, config=None):
+        self.model_type = 'prophet'
         self.config = config or {}
         # Set defaults
         defaults = {
