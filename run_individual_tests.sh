@@ -13,23 +13,22 @@ echo "Results will be saved to: $RESULTS_DIR"
 
 mkdir -p "$RESULTS_DIR"
 
-# 1. Create Model Config (Only GRU + Holt-Winters)
 echo "------------------------------------------------"
-echo "≡ƒöä CONFIGURING SYSTEM: GRU + HOLT-WINTERS ONLY"
+echo "≡ƒöä CONFIGURING SYSTEM: ENABLING ALL 11 MODELS"
 echo "------------------------------------------------"
 cat <<EOC > model-config.yaml
 models:
   gru: true
   holt_winters: true
-  lstm: false
-  lightgbm: false
-  xgboost: false
-  statuscale: false
-  arima: false
-  cnn: false
-  autoencoder: false
-  prophet: false
-  ensemble: false
+  lstm: true
+  lightgbm: true
+  xgboost: true
+  statuscale: true
+  arima: true
+  cnn: true
+  autoencoder: true
+  prophet: true
+  ensemble: true
 EOC
 
 # 2. Apply ConfigMap
@@ -75,7 +74,7 @@ echo "------------------------------------------------"
         $SUDO_CMD kubectl exec $SCALER_POD -- python -c "import requests; print(requests.post('http://localhost:5000/api/baseline/load', json={'scenario': '$SCENARIO'}).text)"
 
         # --- STEP 4: TRAIN MODELS ---
-        $SUDO_CMD kubectl cp trigger_training.sh $SCALER_POD:/tmp/trigger_training.sh && $SUDO_CMD kubectl exec $SCALER_POD -- /bin/bash /tmp/trigger_training.sh
+        $SUDO_CMD kubectl exec $SCALER_POD -- python -c "import requests; print(requests.post('http://localhost:5000/api/models/train_all').text)"
 
         # --- STEP 5: WAIT FOR TRAINING ---
         echo "ΓÅ│ Waiting 300s for training..."
