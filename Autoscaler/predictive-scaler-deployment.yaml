@@ -26,7 +26,7 @@ spec:
       containers:
       - name: predictive-scaler
         # Make sure image includes the kubernetes client library!
-        image: 4dri4l/predictive-scaler:v2.17-traffic-bypass # Use your actual image
+        image: 4dri4l/predictive-scaler:v2.18 # Use your actual image
         imagePullPolicy: Always
         ports:
         - name: http
