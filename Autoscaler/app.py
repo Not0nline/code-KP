@@ -933,8 +933,8 @@ def update_loop():
                     for data_point in reversed(live_data):
                         actual_time = datetime.fromisoformat(data_point['timestamp'])
                         if actual_time > pred_time:
-                            pred_item['actual'] = data_point['replicas']
-                            squared_errors.append((pred_item['prediction'] - data_point['replicas'])**2)
+                            pred_item['actual'] = data_point['traffic']
+                            squared_errors.append((pred_item['prediction'] - data_point['traffic'])**2)
                             break
                 
                 if squared_errors:
