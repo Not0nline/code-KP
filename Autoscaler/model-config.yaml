@@ -6,9 +6,9 @@
 # CURRENT EXPERIMENT: FULL 11-MODEL ENSEMBLE FOR RESEARCH PAPER
 models:
   # BASIC MODELS (6 models)
-  gru: true              # Original GRU neural network
+  gru: false              # Original GRU neural network
   holt_winters: true     # Holt-Winters exponential smoothing  
-  lstm: true             # LSTM neural network ✅ ENABLED
+  lstm: false             # LSTM neural network ✅ ENABLED
   lightgbm: true         # LightGBM gradient boosting ✅ ENABLED
   xgboost: true          # XGBoost gradient boosting ✅ ENABLED
   statuscale: true       # StatuScale rule-based algorithm ✅ ENABLED
