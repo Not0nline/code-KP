@@ -661,7 +661,7 @@ def train_all_models_api():
         results = registry.train_all_models(training_dataset)
         registry.save_all_models()
         
-        successful = sum(1 for r in results.values() if r.get('success'))
+        successful = sum(1 for r in results.values() if (isinstance(r, bool) and r) or (isinstance(r, dict) and r.get('success')))
         
         return jsonify({
             'success': True,
