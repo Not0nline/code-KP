@@ -26,7 +26,7 @@ import heapq
 import subprocess
 import warnings
 import yaml
-import re # Added for regex
+import re
 
 try:
     import lightgbm as lgb
@@ -40,7 +40,6 @@ try:
 except ImportError:
     XGBOOST_AVAILABLE = False
 
-# Import custom model implementations
 try:
     from lstm_model import LSTMPredictor
     LSTM_MODEL_AVAILABLE = True
@@ -63,7 +62,6 @@ except ImportError:
     STATUSCALE_AVAILABLE = False
     StatuScalePredictor = None
 
-# Import advanced models from research paper
 try:
     from advanced_models import (ARIMAPredictor, CNNPredictor, AutoencoderPredictor, 
                                 ProphetPredictor, EnsemblePredictor, get_available_advanced_models)
@@ -76,7 +74,6 @@ except ImportError:
     ProphetPredictor = None
     EnsemblePredictor = None
 
-# Import enhanced metrics system
 try:
     from enhanced_metrics import (get_metrics_collector, record_model_training, 
                                  record_model_prediction, record_scaling_decision,
@@ -418,22 +415,40 @@ _last_cpu_time = None
 
 # Model configuration (loaded from YAML/ConfigMap or defaults)
 model_config_loaded = False
-enabled_models = {
-    # BASIC MODELS (6 models)
-    'gru': True, 
-    'holt_winters': True,
-    'lstm': True,        # ✅ ENABLED - Fixed LSTM implementation
-    'lightgbm': True,    # ✅ ENABLED - Fixed LightGBM implementation
-    'xgboost': True,     # ✅ ENABLED - Fixed XGBoost implementation
-    'statuscale': True,  # ✅ ENABLED - StatuScale rule-based algorithm
-    # ADVANCED MODELS (5 additional models)
-    'arima': True,       # ✅ ENABLED - ARIMA statistical model
-    'cnn': True,         # ✅ ENABLED - CNN time series forecasting
-    'autoencoder': True, # ✅ ENABLED - Neural autoencoder
-    'prophet': True,     # ✅ ENABLED - Facebook Prophet
-    'ensemble': True     # ✅ ENABLED - Weighted ensemble of all models
-}  # Full 11-model configuration, loaded from /app/model-config.yaml or ConfigMap
+enabled_models = {} # Will be populated dynamically by the function below
 
+def load_dynamic_model_config():
+    """Loads model configuration from YAML file and overwrites the enabled_models dict."""
+    global enabled_models, model_config_loaded
+    if model_config_loaded:
+        return # Already loaded
+   
+    MODEL_CONFIG_PATH = '/app/model-config.yaml'
+    try:
+        if os.path.exists(MODEL_CONFIG_PATH):
+            with open(MODEL_CONFIG_PATH, 'r') as f:
+                config_from_file = yaml.safe_load(f)
+                if config_from_file and 'models' in config_from_file:
+                    enabled_models = config_from_file['models']
+                    logger.info(f"Successfully loaded model configuration from {MODEL_CONFIG_PATH}.")
+                    logger.info(f"Enabled models: {[m for m, e in enabled_models.items() if e]}")
+                    model_config_loaded = True
+                    return
+    except Exception as e:
+        logger.error(f"Error loading model-config.yaml, will use default: {e}")
+
+    # Fallback to default if file not found or is invalid
+    logger.warning(f"Falling back to default model configuration.")
+    enabled_models = {
+        'gru': True, 'holt_winters': True, 'lstm': True, 'lightgbm': True,
+        'xgboost': True, 'statuscale': True, 'arima': True, 'cnn': True,
+        'autoencoder': True, 'prophet': True, 'ensemble': True
+    }
+    model_config_loaded = True
+
+# Call the function to load the config at startup
+load_dynamic_model_config()
+ 
 # Initialization guards
 _init_lock = threading.Lock()
 
