@@ -662,9 +662,15 @@ def train_all_models_api():
         registry.save_all_models()
         
         for model_name, result in results.items():
-            if (isinstance(result, bool) and result) or (isinstance(result, dict) and result.get('success')):
-                model_training_status[model_name] = True
-                logger.info(f"Marking {model_name} as trained.")
+            success = False
+            if isinstance(result, bool):
+                success = result
+            elif isinstance(result, dict):
+                success = result.get('success', False)
+        
+                if success:
+                    model_training_status[model_name] = True
+                    logger.info(f"Marking {model_name} as READY for predictions.")
 
         successful = sum(1 for r in results.values() if (isinstance(r, bool) and r) or (isinstance(r, dict) and r.get('success')))
         
